@@ -1,0 +1,108 @@
+syntax="proto3";
+
+package distributed_log.v1;
+
+option go_package="github.com/Hardik-G1/distributed-log/gen/distributed_log/v1;distributedlogv1";
+
+message AcquireLockRequest {
+    string client_id=1;
+    string request_id=2;
+    string resource_id=3;
+    int64 client_requested_at=4; //unix time just for logging purposes
+}
+enum LockStatus{
+    LOCK_STATUS_UNSPECIFIED=0;
+    LOCK_STATUS_APPROVED=1;
+    LOCK_STATUS_BUSY=2;
+    LOCK_STATUS_INVALID_REQUEST=3;
+    LOCK_STATUS_NOT_LEADER=4;
+}
+
+message AcquireLockResponse{
+    string resource_id=1;
+    LockStatus lock_status=2;
+    string lock_token=3;
+    int64 expiry=4; //unix time
+    string request_id=5;
+    string leader_address=6;
+}
+
+message ReleaseLockRequest{
+    string client_id=1;
+    string request_id=2;
+    string resource_id=3;
+    string lock_token=4;
+    int64 client_requested_at=5; // unix sec
+}
+
+enum ReleaseStatus{
+    RELEASE_STATUS_UNSPECIFIED=0;
+    RELEASE_STATUS_RELEASED=1;
+    RELEASE_STATUS_STALE_TOKEN=2;
+    RELEASE_STATUS_INVALID_REQUEST=3;
+    RELEASE_STATUS_NOT_LEADER=4;
+}
+
+message ReleaseLockResponse{
+    string resource_id=1;
+    string request_id=2;
+    ReleaseStatus release_status=3;
+    string leader_address=4;
+}
+
+message AppendLogRequest{
+    string client_id=1;
+    string request_id=2;
+    string resource_id=3;
+    string message=4;
+    string lock_token=5;
+    int64 client_sent_at=6;
+}
+
+enum AppendStatus{
+    APPEND_STATUS_UNSPECIFIED=0;
+    APPEND_STATUS_COMMITTED=1;
+    APPEND_STATUS_NOT_LEADER=2;
+    APPEND_STATUS_INVALID_REQUEST=3;
+    APPEND_STATUS_EXPIRED_LOCK=4;
+    APPEND_STATUS_STALE_TOKEN=5;
+}
+message AppendLogResponse{
+    string request_id=1;
+    string resource_id=2;
+    AppendStatus append_status=3;
+    string leader_address=4;
+}
+
+message GetLogDataRequest{
+    string client_id=1;
+    string request_id=2;
+    string resource_id=3;
+    int64 log_position=4;
+    int64 length=5;
+    int64 client_sent_at=6;
+}
+
+enum GetStatus{
+    GET_STATUS_UNSPECIFIED=0;
+    GET_STATUS_FETCHED=1;
+    GET_STATUS_INVALID_RESOURCE=2;
+    GET_STATUS_INVALID_POSITION=3;
+    GET_STATUS_NOT_LEADER=4;
+    GET_STATUS_INVALID_LENGTH=5;
+}
+message GetLogDataResponse{
+    string request_id=1;
+    string resource_id=2;
+    string content=3;
+    GetStatus status=4;
+    string leader_address=5;
+}
+
+
+service LockService{
+    rpc AcquireLock(AcquireLockRequest) returns (AcquireLockResponse);
+    rpc ReleaseLock(ReleaseLockRequest) returns (ReleaseLockResponse);
+    rpc AppendLog(AppendLogRequest) returns (AppendLogResponse);
+    rpc GetLogData(GetLogDataRequest) returns (GetLogDataResponse);
+}
