@@ -20,11 +20,17 @@ func (node *Node) applyLoop(ctx context.Context) {
 			if err := node.applyCommitted(ctx); err != nil {
 				return
 			}
+			if err := node.maybeCreateSnapshot(ctx); err != nil {
+				return
+			}
 		}
 	}
 }
 
 func (node *Node) applyCommitted(ctx context.Context) error {
+	if node.stateMachine == nil {
+		return errors.New("state machine is not configured")
+	}
 	for {
 		node.stateMu.Lock()
 		nextIndex := node.state.LastAppliedIndex + 1
@@ -41,14 +47,12 @@ func (node *Node) applyCommitted(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if node.stateMachine == nil {
-			return errors.New("state machine is not configured")
-		}
+
 		if err := node.stateMachine.Apply(ctx, entry); err != nil {
 			return err
 		}
 		node.stateMu.Lock()
-		node.state.LastAppliedIndex = max(nextIndex, node.state.LastAppliedIndex)
+		node.state.LastAppliedIndex = nextIndex
 		node.stateMu.Unlock()
 	}
 }

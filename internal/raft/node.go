@@ -7,26 +7,27 @@ import (
 
 	"github.com/Hardik-G1/distributed-log/internal/config"
 	"github.com/Hardik-G1/distributed-log/internal/storage"
-	"github.com/jackc/pgx/v5"
 )
 
 type Node struct {
 	stateMu     sync.Mutex
 	lifecycleMu sync.Mutex
+	snapshotMu  sync.Mutex
 	config      *config.ServerConfig
 	store       *storage.PostgresStore
 	state       NodeState
+	ctx         context.Context
+	cancel      context.CancelFunc
+	doneCh      chan struct{}
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	doneCh chan struct{}
-
-	started         bool
-	stopped         bool
-	votesReceived   int
-	electionResetCh chan struct{}
-	stateMachine    StateMachine
-	transport       PeerTransport
+	started          bool
+	stopped          bool
+	votesReceived    int
+	votesGranted     map[string]struct{}
+	electionResetCh  chan struct{}
+	stateMachine     StateMachine
+	transport        PeerTransport
+	incomingSnapshot *incomingSnapshot
 }
 
 func NewNode(
@@ -34,6 +35,7 @@ func NewNode(
 	cfg *config.ServerConfig,
 	store *storage.PostgresStore,
 	stateMachine StateMachine,
+	transport PeerTransport,
 ) (*Node, error) {
 	if cfg == nil {
 		return nil, errors.New("node config is nil")
@@ -44,20 +46,15 @@ func NewNode(
 	if stateMachine == nil {
 		return nil, errors.New("state machine is nil")
 	}
-	metadata, err := store.LoadRaftMetadata(ctx)
+	if ctx == nil {
+		return nil, errors.New("context is nil")
+	}
+	recovered, err := recoveryRaftState(ctx, store, stateMachine)
 	if err != nil {
 		return nil, err
 	}
-	lastLogIndex := int64(0)
-	lastLog, err := store.GetLastRaftLog(ctx)
-	switch {
-	case err == nil:
-		lastLogIndex = lastLog.LogIndex
-	case errors.Is(err, pgx.ErrNoRows):
-
-	default:
-		return nil, err
-	}
+	metadata := recovered.Metadata
+	lastLogIndex := recovered.LastLogIndex
 	peers := make(map[string]PeerProgress)
 
 	for peerID := range cfg.PeerAddrs {
@@ -69,22 +66,28 @@ func NewNode(
 			MatchIndex: 0,
 		}
 	}
-
+	if len(peers) > 0 && transport == nil {
+		return nil, errors.New("peer transport is required")
+	}
 	node := &Node{
 		config:          cfg,
 		store:           store,
 		doneCh:          make(chan struct{}),
 		electionResetCh: make(chan struct{}, 1),
 		stateMachine:    stateMachine,
+		transport:       transport,
+		votesGranted:    make(map[string]struct{}),
 		state: NodeState{
-			NodeID:           cfg.NodeID,
-			Role:             RoleFollower,
-			CurrentTerm:      metadata.CurrentTerm,
-			VotedFor:         metadata.VotedFor,
-			CommitIndex:      0,
-			LastAppliedIndex: 0,
-			LeaderID:         "",
-			Peers:            peers,
+			NodeID:            cfg.NodeID,
+			Role:              RoleFollower,
+			CurrentTerm:       metadata.CurrentTerm,
+			VotedFor:          metadata.VotedFor,
+			CommitIndex:       recovered.LastIncludedIndex,
+			LastAppliedIndex:  recovered.LastIncludedIndex,
+			LastIncludedIndex: recovered.LastIncludedIndex,
+			LastIncludedTerm:  recovered.LastIncludedTerm,
+			LeaderID:          "",
+			Peers:             peers,
 		},
 	}
 	return node, nil

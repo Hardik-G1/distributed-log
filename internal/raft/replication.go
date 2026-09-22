@@ -7,7 +7,6 @@ import (
 	"time"
 
 	pb "github.com/Hardik-G1/distributed-log/gen/distributed_log/v1"
-	"github.com/Hardik-G1/distributed-log/internal/storage"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -56,7 +55,14 @@ func (node *Node) replicateToPeer(
 	request, leaderTerm, err := node.buildAppendEntries(
 		ctx, peerID,
 	)
-	if err != nil || request == nil {
+	if err != nil {
+		if errors.Is(err, ErrSnapshotRequired) {
+			_ = node.sendSnapshotToPeer(
+				ctx,
+				transport,
+				peerID,
+			)
+		}
 		return
 	}
 	response, err := transport.SendAppendEntries(
@@ -67,10 +73,12 @@ func (node *Node) replicateToPeer(
 	if err != nil {
 		return
 	}
+	lastSentIndex := request.PrevLogIndex + int64(len(request.Entries))
 	_ = node.handleAppendEntriesResponse(
 		ctx,
 		peerID,
 		leaderTerm,
+		lastSentIndex,
 		response,
 	)
 
@@ -93,22 +101,29 @@ func (node *Node) buildAppendEntries(
 	leaderTerm := node.state.CurrentTerm
 	leaderID := node.state.NodeID
 	leaderCommitIndex := node.state.CommitIndex
+	lastIncludedIndex := node.state.LastIncludedIndex
+	lastIncludedTerm := node.state.LastIncludedTerm
 	node.stateMu.Unlock()
 	if nextIndex < 1 {
 		nextIndex = 1
 	}
+
+	if nextIndex <= lastIncludedIndex {
+		return nil, 0, ErrSnapshotRequired
+	}
 	prevLogIndex := nextIndex - 1
 	prevLogTerm := int64(0)
 
-	if prevLogIndex > 0 {
+	if prevLogIndex == lastIncludedIndex {
+		prevLogTerm = lastIncludedTerm
+	} else if prevLogIndex > lastIncludedIndex {
 		prevEntry, err := node.store.GetRaftLog(ctx, prevLogIndex)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, 0, fmt.Errorf("log index requires a snapshot")
+			return nil, 0, ErrSnapshotRequired
 		}
 		if err != nil {
 			return nil, 0, err
 		}
-
 		prevLogTerm = prevEntry.Term
 	}
 
@@ -135,6 +150,7 @@ func (node *Node) handleAppendEntriesResponse(
 	ctx context.Context,
 	peerID string,
 	sentTerm int64,
+	lastSentIndex int64,
 	response *pb.AppendEntriesResponse,
 ) error {
 	if response == nil {
@@ -142,19 +158,7 @@ func (node *Node) handleAppendEntriesResponse(
 	}
 	node.stateMu.Lock()
 	if response.CurrentTerm > node.state.CurrentTerm {
-		node.state.CurrentTerm = response.CurrentTerm
-		node.state.Role = RoleFollower
-		node.state.VotedFor = ""
-		node.state.LeaderID = ""
-		node.votesReceived = 0
-
-		err := node.store.SaveRaftMetadata(
-			ctx,
-			storage.RaftMetadata{
-				CurrentTerm: node.state.CurrentTerm,
-				VotedFor:    node.state.VotedFor,
-			},
-		)
+		err := node.stepDownForTermLocked(ctx, response.CurrentTerm)
 		node.stateMu.Unlock()
 		if err != nil {
 			return err
@@ -174,7 +178,12 @@ func (node *Node) handleAppendEntriesResponse(
 
 	switch response.AppendStatus {
 	case pb.AppendResponse_APPEND_RESPONSE_SUCCESS:
-		progress.MatchIndex = max(response.MatchIndex, progress.MatchIndex)
+		reportedMatchIndex := response.MatchIndex
+		reportedMatchIndex = min(lastSentIndex, reportedMatchIndex)
+		if reportedMatchIndex > progress.MatchIndex {
+			progress.MatchIndex = reportedMatchIndex
+		}
+
 		progress.NextIndex = progress.MatchIndex + 1
 		node.state.Peers[peerID] = progress
 		node.stateMu.Unlock()
@@ -238,4 +247,135 @@ func (node *Node) advanceCommitIndex(
 		}
 	}
 	return nil
+}
+
+const snapshotChunkSize = 64 * 1024
+
+func (node *Node) sendSnapshotToPeer(
+	ctx context.Context,
+	transport PeerTransport,
+	peerID string,
+) error {
+	snapshot, data, err := node.store.LoadLatestSnapshot(ctx)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errors.New("no snapshot is available")
+	}
+	if err != nil {
+		return err
+	}
+	node.stateMu.Lock()
+	leaderID := node.state.NodeID
+
+	if node.state.Role != RoleLeader {
+		node.stateMu.Unlock()
+		return &NotLeaderError{LeaderID: leaderID}
+	}
+	leaderTerm := node.state.CurrentTerm
+	node.stateMu.Unlock()
+	sendChunk := func(
+		request *pb.InstallSnapshotRequest,
+		finalChunk bool,
+	) error {
+		response, err := transport.SendInstallSnapshot(
+			ctx,
+			peerID,
+			request,
+		)
+		if err != nil {
+			return err
+		}
+		if response == nil {
+			return errors.New("empty installsnapshot response")
+		}
+		if response.Term > leaderTerm {
+			node.stateMu.Lock()
+			stepDownErr := node.stepDownForTermLocked(
+				ctx, response.Term,
+			)
+			node.stateMu.Unlock()
+
+			if stepDownErr != nil {
+				return stepDownErr
+			}
+			node.resetElectionTimer()
+			return &NotLeaderError{}
+		}
+
+		switch response.Status {
+		case pb.SnapshotStatus_SNAPSHOT_STATUS_ACCEPTED:
+			if finalChunk {
+				return fmt.Errorf("final chunk was not installed %s", response.Status.String())
+			}
+
+		case pb.SnapshotStatus_SNAPSHOT_STATUS_INSTALLED:
+			if !finalChunk {
+				return fmt.Errorf("final chunk was not installed %s", response.Status.String())
+			}
+		case pb.SnapshotStatus_SNAPSHOT_STATUS_OLD_TERM,
+			pb.SnapshotStatus_SNAPSHOT_STATUS_BAD_INDEX,
+			pb.SnapshotStatus_SNAPSHOT_STATUS_REJECTED:
+			return fmt.Errorf(
+				"follower rejected snapshot %s",
+				response.Status.String(),
+			)
+		default:
+			return errors.New("unknown snapshot response status")
+
+		}
+		return nil
+	}
+
+	if len(data) == 0 {
+		request := &pb.InstallSnapshotRequest{
+			LeaderId:          leaderID,
+			CurrentTerm:       leaderTerm,
+			LastIncludedIndex: snapshot.LastIncludedIndex,
+			LastIncludedTerm:  snapshot.LastIncludedTerm,
+			Offset:            0,
+			Data:              nil,
+			Done:              true,
+		}
+		if err := sendChunk(request, true); err != nil {
+			return err
+		}
+	} else {
+		for offset := int64(0); offset < int64(len(data)); {
+			end := offset + snapshotChunkSize
+			if end > int64(len(data)) {
+				end = int64(len(data))
+			}
+			finalChunk := end == int64(len(data))
+			request := &pb.InstallSnapshotRequest{
+				LeaderId:          leaderID,
+				CurrentTerm:       leaderTerm,
+				LastIncludedIndex: snapshot.LastIncludedIndex,
+				LastIncludedTerm:  snapshot.LastIncludedTerm,
+				Offset:            offset,
+				Data:              data[offset:end],
+				Done:              finalChunk,
+			}
+			if err := sendChunk(request, finalChunk); err != nil {
+				return err
+			}
+			offset = end
+		}
+	}
+
+	node.stateMu.Lock()
+	defer node.stateMu.Unlock()
+
+	progress, exists := node.state.Peers[peerID]
+	if !exists {
+		return fmt.Errorf("unknown peer %s", peerID)
+	}
+
+	if progress.MatchIndex < snapshot.LastIncludedIndex {
+		progress.MatchIndex = snapshot.LastIncludedIndex
+	}
+	if progress.NextIndex < snapshot.LastIncludedIndex+1 {
+		progress.NextIndex = snapshot.LastIncludedIndex + 1
+	}
+	node.state.Peers[peerID] = progress
+	return nil
+
 }

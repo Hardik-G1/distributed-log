@@ -18,6 +18,7 @@ func (node *Node) stepDownForTermLocked(
 	node.state.VotedFor = ""
 	node.state.LeaderID = ""
 	node.votesReceived = 0
+	node.votesGranted = make(map[string]struct{})
 
 	return node.store.SaveRaftMetadata(
 		ctx,

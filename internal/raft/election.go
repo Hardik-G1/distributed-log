@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"errors"
 	"math/rand"
 	"time"
 
@@ -43,25 +44,30 @@ func (node *Node) startElection(ctx context.Context) error {
 	}
 
 	node.stateMu.Lock()
-	if node.state.Role == RoleFollower {
+	if node.state.Role == RoleLeader {
 		node.stateMu.Unlock()
 		return nil
+	}
+	transport := node.transport
+	peerCount := len(node.state.Peers)
+	if peerCount > 0 && transport == nil {
+		node.stateMu.Unlock()
+		return errors.New("peer transport is not configured")
 	}
 	node.state.Role = RoleCandidate
 	node.state.CurrentTerm++
 	node.state.VotedFor = node.state.NodeID
 	node.state.LeaderID = ""
 	node.votesReceived = 1
+	node.votesGranted = make(map[string]struct{})
+	node.votesGranted[node.state.NodeID] = struct{}{}
 	metadata := storage.RaftMetadata{
 		CurrentTerm: node.state.CurrentTerm,
 		VotedFor:    node.state.VotedFor,
 	}
-	if err := node.store.SaveRaftMetadata(ctx, metadata); err != nil {
-		return err
-	}
 	electionTerm := node.state.CurrentTerm
 	candidateID := node.state.NodeID
-	transport := node.transport
+
 	request := &pb.RequestVoteRequest{
 		VoteTerm:             electionTerm,
 		CandidateLogIndex:    lastLogIndex,
@@ -72,6 +78,11 @@ func (node *Node) startElection(ctx context.Context) error {
 	peerIDs := make([]string, 0, len(node.state.Peers))
 	for peerID := range node.state.Peers {
 		peerIDs = append(peerIDs, peerID)
+	}
+
+	if err := node.store.SaveRaftMetadata(ctx, metadata); err != nil {
+		node.stateMu.Unlock()
+		return err
 	}
 
 	if node.votesReceived >= majority(len(node.state.Peers)+1) {

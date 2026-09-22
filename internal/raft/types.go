@@ -14,13 +14,15 @@ type PeerProgress struct {
 }
 
 type NodeState struct {
-	NodeID           string
-	Role             Role
-	CurrentTerm      int64
-	VotedFor         string
-	CommitIndex      int64
-	LastAppliedIndex int64
-	LeaderID         string
+	NodeID            string
+	Role              Role
+	CurrentTerm       int64
+	VotedFor          string
+	CommitIndex       int64
+	LastAppliedIndex  int64
+	LeaderID          string
+	LastIncludedIndex int64
+	LastIncludedTerm  int64
 
 	Peers map[string]PeerProgress //basically something to know whether others NextIndex MatchIndex when the node is a leader
 }

@@ -19,15 +19,32 @@ import (
 // append new entries
 // handle empty heartbeats
 // advance follower commitIndex
+func validateAppendEntriesRequest(req *pb.AppendEntriesRequest) error {
+	if req == nil {
+		return errors.New("request is nil")
+	}
+	if req.SenderId == "" {
+		return errors.New("sender id is empty")
+	}
+	if req.LeaderTerm < 0 || req.PrevLogIndex < 0 || req.PrevLogTerm < 0 || req.LeaderCommitIndex < 0 {
+		return errors.New("raft values cannot be negative")
+	}
+	for _, entry := range req.Entries {
+		if entry == nil {
+			return errors.New("entry is nil")
+		}
+		if entry.Term < 0 {
+			return errors.New("entry has a negative term")
+		}
+	}
+	return nil
+}
 func (node *Node) HandleAppendEntries(
 	ctx context.Context,
 	req *pb.AppendEntriesRequest,
 ) (*pb.AppendEntriesResponse, error) {
-	if req == nil {
-		return nil, errors.New("request is nil")
-	}
-	if req.SenderId == "" {
-		return nil, errors.New("sender id is empty")
+	if err := validateAppendEntriesRequest(req); err != nil {
+		return nil, err
 	}
 	node.stateMu.Lock()
 	defer node.stateMu.Unlock()
@@ -44,12 +61,7 @@ func (node *Node) HandleAppendEntries(
 	}
 	//a newer term makes this node a follower
 	if req.LeaderTerm > node.state.CurrentTerm {
-		node.state.CurrentTerm = req.LeaderTerm
-		node.state.VotedFor = ""
-		if err := node.store.SaveRaftMetadata(ctx, storage.RaftMetadata{
-			CurrentTerm: node.state.CurrentTerm,
-			VotedFor:    node.state.VotedFor,
-		}); err != nil {
+		if err := node.stepDownForTermLocked(ctx, req.LeaderTerm); err != nil {
 			return nil, err
 		}
 	}
@@ -104,12 +116,22 @@ func (node *Node) verifyPreviousEntry(
 	index int64,
 	term int64,
 ) error {
-	if index == 0 {
-		return nil
-	}
-
 	if index < 0 {
 		return ErrLogMismatch
+	}
+	node.stateMu.Lock()
+	lastIncludedIndex := node.state.LastIncludedIndex
+	lastIncludedTerm := node.state.LastIncludedTerm
+	node.stateMu.Unlock()
+
+	if index < lastIncludedIndex {
+		return ErrLogMismatch
+	}
+	if index == lastIncludedIndex {
+		if term != lastIncludedTerm {
+			return ErrLogMismatch
+		}
+		return nil
 	}
 
 	entry, err := node.store.GetRaftLog(ctx, index)
@@ -161,6 +183,9 @@ func (node *Node) replaceFollowerSuffix(
 	start int,
 	startIndex int64,
 ) error {
+	if start < 0 || start > len(req.Entries) {
+		return errors.New("invalid replacement start index")
+	}
 	entries := make([]storage.RaftLog, 0, len(req.Entries)-start)
 	for _, incoming := range req.Entries[start:] {
 		entries = append(entries, storage.RaftLog{

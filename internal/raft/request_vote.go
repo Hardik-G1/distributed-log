@@ -18,6 +18,9 @@ func (node *Node) HandleRequestVote(
 	if req.CandidateId == "" {
 		return nil, errors.New("candidate id is empty")
 	}
+	if req.VoteTerm < 0 || req.CandidateLogIndex < 0 || req.CandidateLastLogTerm < 0 {
+		return nil, errors.New("vote request contain negative values")
+	}
 	lastLogIndex, lastLogTerm, err := node.lastLogInfo(ctx)
 	if err != nil {
 		return nil, err
@@ -38,15 +41,7 @@ func (node *Node) HandleRequestVote(
 
 	// a new term makes this node a follower
 	if req.VoteTerm > node.state.CurrentTerm {
-		node.state.CurrentTerm = req.VoteTerm
-		node.state.Role = RoleFollower
-		node.state.VotedFor = ""
-		node.state.LeaderID = ""
-		metadata := storage.RaftMetadata{
-			CurrentTerm: node.state.CurrentTerm,
-			VotedFor:    node.state.VotedFor,
-		}
-		if err := node.store.SaveRaftMetadata(ctx, metadata); err != nil {
+		if err := node.stepDownForTermLocked(ctx, req.VoteTerm); err != nil {
 			return nil, err
 		}
 	}
@@ -87,13 +82,7 @@ func (node *Node) handleVoteResponse(
 	node.stateMu.Lock()
 	defer node.stateMu.Unlock()
 	if response.VoteTerm > node.state.CurrentTerm {
-		node.state.CurrentTerm = response.VoteTerm
-		node.state.Role = RoleFollower
-		node.state.VotedFor = ""
-		node.state.LeaderID = ""
-		node.votesReceived = 0
-
-		err := node.store.SaveRaftMetadata(ctx, storage.RaftMetadata{CurrentTerm: node.state.CurrentTerm, VotedFor: ""})
+		err := node.stepDownForTermLocked(ctx, response.VoteTerm)
 		if err != nil {
 			return err
 		}
@@ -106,9 +95,22 @@ func (node *Node) handleVoteResponse(
 	if node.state.CurrentTerm != electionTerm {
 		return nil
 	}
+	if response.VoteTerm != electionTerm {
+		return nil
+	}
 	if response.VoteStatus != pb.Vote_VOTE_GRANTED {
 		return nil
 	}
+	if response.VoterId == "" {
+		return nil
+	}
+	if _, exists := node.state.Peers[response.VoterId]; !exists {
+		return nil
+	}
+	if _, alreadyCounted := node.votesGranted[response.VoterId]; alreadyCounted {
+		return nil
+	}
+	node.votesGranted[response.VoterId] = struct{}{}
 	node.votesReceived++
 
 	if node.votesReceived >= majority(len(node.state.Peers)+1) {

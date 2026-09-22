@@ -133,6 +133,12 @@ func (tx *TxStore) DeleteRaftEntriesFrom(ctx context.Context, index int64) error
 	return err
 }
 
+func (store *PostgresStore) DeleteRaftEntriesThrough(ctx context.Context, index int64) error {
+	return store.WithTransaction(ctx, func(tx *TxStore) error {
+		return tx.DeleteRaftEntriesThrough(ctx, index)
+	})
+}
+
 func (tx *TxStore) DeleteRaftEntriesThrough(ctx context.Context, index int64) error {
 	_, err := tx.db.Exec(ctx,
 		`

@@ -15,7 +15,7 @@ func toProtoLogEntry(entry storage.RaftLog) *pb.LogEntry {
 	}
 }
 
-func fromPrototoLogEntry(index int64, entry *pb.LogEntry) (storage.RaftLog, error) {
+func fromProtoLogEntry(index int64, entry *pb.LogEntry) (storage.RaftLog, error) {
 	if entry == nil {
 		return storage.RaftLog{}, errors.New("log is nil")
 	}
@@ -39,7 +39,7 @@ func fromProtoLogEntries(startIndex int64, entries []*pb.LogEntry) ([]storage.Ra
 	result := make([]storage.RaftLog, 0, len(entries))
 	for offset, entry := range entries {
 		index := startIndex + int64(offset)
-		converted, err := fromPrototoLogEntry(index, entry)
+		converted, err := fromProtoLogEntry(index, entry)
 		if err != nil {
 			return nil, err
 		}

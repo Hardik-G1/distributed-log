@@ -15,6 +15,7 @@ type ServerConfig struct {
 	ElectionTimeout   time.Duration
 	PostgresDSN       string
 	SnapshotThreshold int
+	SnapshotDirectory string
 }
 
 func parsePeers(raw string) (map[string]string, error) {
@@ -51,6 +52,7 @@ func ServerConfigLoad(args []string) (*ServerConfig, error) {
 	electionTimeout := flags.Duration("election-timeout", 500*time.Millisecond, "election timeout")
 	postgresDSN := flags.String("postgres-dsn", "localhost:6001", "the storage location")
 	snapshotThreshold := flags.Int("snapshot-threshold", 10000, "the threshold at the snapshot")
+	snapshotDirectory := flag.String("snapshot-directory", "data/snapshot", "directory for local raft snapshots")
 
 	if err := flags.Parse(args); err != nil {
 		return nil, err
@@ -81,5 +83,6 @@ func ServerConfigLoad(args []string) (*ServerConfig, error) {
 		ElectionTimeout:   *electionTimeout,
 		PostgresDSN:       *postgresDSN,
 		SnapshotThreshold: *snapshotThreshold,
+		SnapshotDirectory: *snapshotDirectory,
 	}, nil
 }

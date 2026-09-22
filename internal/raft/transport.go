@@ -12,6 +12,7 @@ import (
 type PeerTransport interface {
 	SendRequestVote(ctx context.Context, peerID string, request *pb.RequestVoteRequest) (*pb.RequestVoteResponse, error)
 	SendAppendEntries(ctx context.Context, peerID string, request *pb.AppendEntriesRequest) (*pb.AppendEntriesResponse, error)
+	SendInstallSnapshot(ctx context.Context, peerID string, request *pb.InstallSnapshotRequest) (*pb.InstallSnapshotResponse, error)
 }
 
 type GRPCTransport struct {
@@ -75,6 +76,19 @@ func (transport *GRPCTransport) SendAppendEntries(
 	}
 	return client.AppendEntries(ctx, request)
 }
+
+func (transport *GRPCTransport) SendInstallSnapshot(
+	ctx context.Context,
+	peerID string,
+	request *pb.InstallSnapshotRequest,
+) (*pb.InstallSnapshotResponse, error) {
+	client, err := transport.clientForPeer(peerID)
+	if err != nil {
+		return nil, err
+	}
+	return client.InstallSnapshot(ctx, request)
+}
+
 func (transport *GRPCTransport) Close() {
 	for _, conn := range transport.conns {
 		_ = conn.Close()
