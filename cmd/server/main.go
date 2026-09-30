@@ -13,6 +13,7 @@ import (
 	"github.com/Hardik-G1/distributed-log/internal/api"
 	"github.com/Hardik-G1/distributed-log/internal/config"
 	"github.com/Hardik-G1/distributed-log/internal/raft"
+	"github.com/Hardik-G1/distributed-log/internal/state"
 	"github.com/Hardik-G1/distributed-log/internal/storage"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
@@ -31,11 +32,9 @@ func main() {
 		syscall.SIGTERM,
 	)
 	defer cancel()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		log.Fatal("database url not found")
+	if cfg.PostgresDSN == "" {
+		log.Fatal("postgres DSN is required")
 	}
-
 	pool, err := storage.OpenPostgres(ctx, cfg.PostgresDSN)
 	if err != nil {
 		log.Fatal(err)
@@ -48,11 +47,14 @@ func main() {
 	}
 	defer transport.Close()
 
-	stateMachine := loggingStateMachine{}
+	lockManager, err := state.NewLockManager(store)
+	if err != nil {
+		log.Fatal(err)
+	}
 	node, err := raft.NewNode(
 		ctx,
 		cfg, store,
-		stateMachine,
+		lockManager,
 		transport,
 	)
 	if err != nil {
@@ -81,36 +83,14 @@ func main() {
 		<-ctx.Done()
 		grpcServer.GracefulStop()
 	}()
-	lock_service := api.LockServer{}
-	pb.RegisterLockServiceServer(grpcServer, &lock_service)
+	lockServer, err := api.NewLockServer(node, store)
+	if err != nil {
+		log.Fatal(err)
+	}
+	pb.RegisterLockServiceServer(grpcServer, lockServer)
 	if err := grpcServer.Serve(listener); err != nil &&
 		!errors.Is(err, grpc.ErrServerStopped) {
 		log.Fatal(err)
 	}
 
-}
-
-type loggingStateMachine struct{}
-
-func (loggingStateMachine) Apply(
-	ctx context.Context,
-	entry storage.RaftLog,
-) error {
-	log.Printf("Applying Raft Log")
-	return nil
-}
-func (loggingStateMachine) Snapshot(
-	ctx context.Context,
-) ([]byte, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return []byte{}, nil
-}
-func (loggingStateMachine) Restore(
-	ctx context.Context,
-	data []byte,
-) error {
-	log.Printf("Applying Raft Log")
-	return nil
 }
