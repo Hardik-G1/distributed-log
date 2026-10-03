@@ -11,10 +11,11 @@ import (
 )
 
 type LockStore interface {
-	ApplyAcquireLock(ctx context.Context, req *pb.AcquireLockRequest) error
+	ApplyAcquireLock(ctx context.Context, req *pb.AcquireLockRequest, lockToken string, expiry int64, observedAt int64) error
 	SnapshotApplicationState(ctx context.Context) ([]byte, error)
 	RestoreApplicationState(ctx context.Context, data []byte) error
-	ApplyReleaseLock(ctx context.Context, req *pb.ReleaseLockRequest) error
+	ApplyReleaseLock(ctx context.Context, req *pb.ReleaseLockRequest, observedAt int64) error
+	ApplyAppendLog(ctx context.Context, req *pb.AppendLogRequest, observedAt int64) error
 }
 
 type LockManager struct {
@@ -38,12 +39,14 @@ func (manager *LockManager) Apply(
 		return errors.New("context is nil")
 	}
 	switch pb.Operation(entry.OperationType) {
+	case pb.Operation_OPERATION_NOOP:
+		return nil
 	case pb.Operation_OPERATION_ACQUIRE_LOCK:
 		return manager.applyAcquireLock(ctx, entry.OperationPayload)
 	case pb.Operation_OPERATION_RELEASE_LOCK:
 		return manager.applyReleaseLock(ctx, entry.OperationPayload)
 	case pb.Operation_OPERATION_APPEND_LOG:
-		return errors.New("append log is not implemented")
+		return manager.applyAppendLog(ctx, entry.OperationPayload)
 	default:
 		return fmt.Errorf(
 			"unsupported raft operation %d",
@@ -55,12 +58,15 @@ func (manager *LockManager) applyAcquireLock(
 	ctx context.Context,
 	payload []byte,
 ) error {
-	var request pb.AcquireLockRequest
+	var command pb.AcquireLockCommand
 
-	if err := proto.Unmarshal(payload, &request); err != nil {
-		return fmt.Errorf("decode acquire lock request %w", err)
+	if err := proto.Unmarshal(payload, &command); err != nil {
+		return fmt.Errorf("decode acquire lock command %w", err)
 	}
-
+	request := command.GetRequest()
+	if request == nil {
+		return errors.New("acquire lock request is empty")
+	}
 	if request.ClientId == "" {
 		return errors.New("client id is empty")
 	}
@@ -70,20 +76,28 @@ func (manager *LockManager) applyAcquireLock(
 	if request.ResourceId == "" {
 		return errors.New("resource id is empty")
 	}
-
-	return manager.store.ApplyAcquireLock(ctx, &request)
+	if command.LockToken == "" {
+		return errors.New("lock token is empty")
+	}
+	if command.Expiry <= command.ObservedAt {
+		return errors.New("lock expiry is invalid")
+	}
+	return manager.store.ApplyAcquireLock(ctx, request, command.LockToken, command.Expiry, command.ObservedAt)
 
 }
 func (manager *LockManager) applyReleaseLock(
 	ctx context.Context,
 	payload []byte,
 ) error {
-	var request pb.ReleaseLockRequest
+	var command pb.ReleaseLockCommand
 
-	if err := proto.Unmarshal(payload, &request); err != nil {
-		return fmt.Errorf("decode release lock request %w", err)
+	if err := proto.Unmarshal(payload, &command); err != nil {
+		return fmt.Errorf("decode release lock command %w", err)
 	}
-
+	request := command.GetRequest()
+	if request == nil {
+		return errors.New("release lock request is empty")
+	}
 	if request.ClientId == "" {
 		return errors.New("client id is empty")
 	}
@@ -96,8 +110,46 @@ func (manager *LockManager) applyReleaseLock(
 	if request.LockToken == "" {
 		return errors.New("lock token is empty")
 	}
+	if command.ObservedAt <= 0 {
+		return errors.New("observed time is invalid")
+	}
 
-	return manager.store.ApplyReleaseLock(ctx, &request)
+	return manager.store.ApplyReleaseLock(ctx, request, command.ObservedAt)
+
+}
+
+func (manager *LockManager) applyAppendLog(
+	ctx context.Context,
+	payload []byte,
+) error {
+	var command pb.AppendLogCommand
+
+	if err := proto.Unmarshal(payload, &command); err != nil {
+		return fmt.Errorf("decode append log command %w", err)
+	}
+	request := command.GetRequest()
+	if request == nil {
+		return errors.New("append log request is empty")
+	}
+	if request.ClientId == "" {
+		return errors.New("client id is empty")
+	}
+	if request.RequestId == "" {
+		return errors.New("request id is empty")
+	}
+	if request.ResourceId == "" {
+		return errors.New("resource id is empty")
+	}
+	if request.Message == "" {
+		return errors.New("message is empty")
+	}
+	if request.LockToken == "" {
+		return errors.New("lock token is empty")
+	}
+	if command.ObservedAt <= 0 {
+		return errors.New("observed time is invalid")
+	}
+	return manager.store.ApplyAppendLog(ctx, request, command.ObservedAt)
 
 }
 func (manager *LockManager) Snapshot(

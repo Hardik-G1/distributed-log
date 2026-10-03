@@ -3,6 +3,7 @@ package raft
 import (
 	"context"
 	"errors"
+	"time"
 
 	pb "github.com/Hardik-G1/distributed-log/gen/distributed_log/v1"
 	"github.com/Hardik-G1/distributed-log/internal/storage"
@@ -21,12 +22,20 @@ func (node *Node) HandleRequestVote(
 	if req.VoteTerm < 0 || req.CandidateLogIndex < 0 || req.CandidateLastLogTerm < 0 {
 		return nil, errors.New("vote request contain negative values")
 	}
+	node.logMu.Lock()
+	defer node.logMu.Unlock()
 	lastLogIndex, lastLogTerm, err := node.lastLogInfo(ctx)
 	if err != nil {
 		return nil, err
 	}
+
+	// a new term makes this node a follower
+	if err := node.stepDownForTerm(ctx, req.VoteTerm); err != nil {
+		return nil, err
+	}
+	node.termMu.Lock()
+	defer node.termMu.Unlock()
 	node.stateMu.Lock()
-	defer node.stateMu.Unlock()
 
 	response := &pb.RequestVoteResponse{
 		VoteTerm:   node.state.CurrentTerm,
@@ -36,17 +45,9 @@ func (node *Node) HandleRequestVote(
 
 	//reject older terms
 	if req.VoteTerm < node.state.CurrentTerm {
+		node.stateMu.Unlock()
 		return response, nil
 	}
-
-	// a new term makes this node a follower
-	if req.VoteTerm > node.state.CurrentTerm {
-		if err := node.stepDownForTermLocked(ctx, req.VoteTerm); err != nil {
-			return nil, err
-		}
-	}
-
-	response.VoteTerm = node.state.CurrentTerm
 
 	candidateLogIsUpToDate :=
 		req.CandidateLastLogTerm > lastLogTerm ||
@@ -54,19 +55,22 @@ func (node *Node) HandleRequestVote(
 
 	canVote := node.state.VotedFor == "" || node.state.VotedFor == req.CandidateId
 
-	if candidateLogIsUpToDate && canVote {
-		node.state.VotedFor = req.CandidateId
-		metadata := storage.RaftMetadata{
-			CurrentTerm: node.state.CurrentTerm,
-			VotedFor:    node.state.VotedFor,
-		}
-		if err := node.store.SaveRaftMetadata(ctx, metadata); err != nil {
-			return nil, err
-		}
-
-		response.VoteStatus = pb.Vote_VOTE_GRANTED
-		node.resetElectionTimer()
+	if !candidateLogIsUpToDate || !canVote {
+		node.stateMu.Unlock()
+		return response, nil
 	}
+	node.state.VotedFor = req.CandidateId
+	metadata := storage.RaftMetadata{
+		CurrentTerm: node.state.CurrentTerm,
+		VotedFor:    node.state.VotedFor,
+	}
+	response.VoteStatus = pb.Vote_VOTE_GRANTED
+	node.stateMu.Unlock()
+	if err := node.store.SaveRaftMetadata(ctx, metadata); err != nil {
+		return nil, err
+	}
+
+	node.resetElectionTimer()
 	return response, nil
 }
 
@@ -80,15 +84,18 @@ func (node *Node) handleVoteResponse(
 		return nil
 	}
 	node.stateMu.Lock()
-	defer node.stateMu.Unlock()
-	if response.VoteTerm > node.state.CurrentTerm {
-		err := node.stepDownForTermLocked(ctx, response.VoteTerm)
+	currentTerm := node.state.CurrentTerm
+	node.stateMu.Unlock()
+	if response.VoteTerm > currentTerm {
+		err := node.stepDownForTerm(ctx, response.VoteTerm)
 		if err != nil {
 			return err
 		}
 		node.resetElectionTimer()
 		return nil
 	}
+	node.stateMu.Lock()
+	defer node.stateMu.Unlock()
 	if node.state.Role != RoleCandidate {
 		return nil
 	}
@@ -120,13 +127,68 @@ func (node *Node) handleVoteResponse(
 }
 
 func (node *Node) lastLogInfo(ctx context.Context) (int64, int64, error) {
+	if ctx == nil {
+		return 0, 0, errors.New("context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, 0, err
+	}
+	node.stateMu.Lock()
+	lastIncludedIndex := node.state.LastIncludedIndex
+	lastIncludedTerm := node.state.LastIncludedTerm
+	node.stateMu.Unlock()
+
 	entry, err := node.store.GetLastRaftLog(ctx)
+
 	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, 0, nil
+		return lastIncludedIndex, lastIncludedTerm, nil
 	}
 	if err != nil {
 		return 0, 0, err
 	}
+	if entry.LogIndex <= lastIncludedIndex {
+		return lastIncludedIndex, lastIncludedTerm, nil
+	}
 	return entry.LogIndex, entry.Term, nil
+}
 
+func (node *Node) HandlePreVote(
+	ctx context.Context,
+	req *pb.PreVoteRequest,
+) (*pb.PreVoteResponse, error) {
+	if req == nil {
+		return nil, errors.New("pre-vote request is nil")
+	}
+	if req.CandidateId == "" {
+		return nil, errors.New("candidate id is empty")
+	}
+	if req.VoteTerm < 0 || req.CandidateLogIndex < 0 || req.CandidateLastLogTerm < 0 {
+		return nil, errors.New("pre-vote request contains negative values")
+	}
+	node.logMu.Lock()
+	lastLogIndex, lastLogTerm, err := node.lastLogInfo(ctx)
+	node.logMu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	node.stateMu.Lock()
+	defer node.stateMu.Unlock()
+	response := &pb.PreVoteResponse{
+		VoteTerm:   node.state.CurrentTerm,
+		VoterId:    node.state.NodeID,
+		VoteStatus: pb.Vote_VOTE_REJECTED,
+	}
+	if req.VoteTerm < node.state.CurrentTerm+1 ||
+		node.state.Role == RoleLeader {
+		return response, nil
+	}
+	if !node.lastLeaderContact.IsZero() &&
+		time.Since(node.lastLeaderContact) < node.config.ElectionTimeout {
+		return response, nil
+	}
+	candidateLogIsUpToDate := req.CandidateLastLogTerm > lastLogTerm || (req.CandidateLastLogTerm == lastLogTerm && req.CandidateLogIndex >= lastLogIndex)
+	if candidateLogIsUpToDate {
+		response.VoteStatus = pb.Vote_VOTE_GRANTED
+	}
+	return response, nil
 }

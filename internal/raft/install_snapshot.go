@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	pb "github.com/Hardik-G1/distributed-log/gen/distributed_log/v1"
 	"github.com/Hardik-G1/distributed-log/internal/storage"
@@ -44,6 +45,9 @@ func (node *Node) HandleInstallSnapshot(
 			Status: pb.SnapshotStatus_SNAPSHOT_STATUS_REJECTED,
 		}, errors.New("state machine does not support snapshot restore")
 	}
+	if err := node.stepDownForTerm(ctx, req.CurrentTerm); err != nil {
+		return nil, err
+	}
 	node.stateMu.Lock()
 
 	if req.CurrentTerm < node.state.CurrentTerm {
@@ -55,21 +59,17 @@ func (node *Node) HandleInstallSnapshot(
 		}, nil
 	}
 
-	if req.CurrentTerm > node.state.CurrentTerm {
-		if err := node.stepDownForTermLocked(ctx, req.CurrentTerm); err != nil {
-			node.stateMu.Unlock()
-			return nil, err
-		}
-	}
-
+	node.installingSnapshot.Store(true)
+	defer node.installingSnapshot.Store(false)
 	node.state.Role = RoleFollower
 	node.state.LeaderID = req.LeaderId
-	node.resetElectionTimer()
+	node.lastLeaderContact = time.Now()
 
 	currentTerm := node.state.CurrentTerm
 	lastIncludedIndex := node.state.LastIncludedIndex
 	lastIncludedTerm := node.state.LastIncludedTerm
 	node.stateMu.Unlock()
+	node.resetElectionTimer()
 
 	if req.LastIncludedIndex < lastIncludedIndex ||
 		(req.LastIncludedIndex == lastIncludedIndex &&
@@ -177,6 +177,10 @@ func (node *Node) HandleInstallSnapshot(
 			Status: pb.SnapshotStatus_SNAPSHOT_STATUS_ACCEPTED,
 		}, nil
 	}
+	node.stateMachineMu.Lock()
+	defer node.stateMachineMu.Unlock()
+	node.logMu.Lock()
+	defer node.logMu.Unlock()
 	data, err := os.ReadFile(incoming.TempPath)
 	if err != nil {
 		return nil, fmt.Errorf("read incoming snapshot %w", err)
@@ -200,7 +204,6 @@ func (node *Node) HandleInstallSnapshot(
 	); err != nil {
 		return nil, err
 	}
-
 	if err := restorer.Restore(ctx, data); err != nil {
 		return nil, err
 	}
@@ -222,8 +225,9 @@ func (node *Node) HandleInstallSnapshot(
 	if node.state.LastAppliedIndex < incoming.LastIncludedIndex {
 		node.state.LastAppliedIndex = incoming.LastIncludedIndex
 	}
-
+	node.lastLeaderContact = time.Now()
 	node.stateMu.Unlock()
+	node.resetElectionTimer()
 	_ = os.Remove(incoming.TempPath)
 	node.incomingSnapshot = nil
 

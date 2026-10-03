@@ -2,22 +2,20 @@ package storage
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"time"
 
 	pb "github.com/Hardik-G1/distributed-log/gen/distributed_log/v1"
 	"github.com/jackc/pgx/v5"
 	"google.golang.org/protobuf/proto"
 )
 
-const defaultLockTTL = 30 * time.Second
-
 func (store *PostgresStore) ApplyAcquireLock(
 	ctx context.Context,
 	req *pb.AcquireLockRequest,
+	lockToken string,
+	expiry int64,
+	observedAt int64,
 ) error {
 	if ctx == nil {
 		return errors.New("context is nil")
@@ -37,6 +35,12 @@ func (store *PostgresStore) ApplyAcquireLock(
 	if req.ResourceId == "" {
 		return errors.New("resource id is empty")
 	}
+	if lockToken == "" {
+		return errors.New("lock token is empty")
+	}
+	if expiry <= observedAt {
+		return errors.New("lock expiry is invalid")
+	}
 	tx, err := store.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin acquire-lock transaction %w", err)
@@ -50,7 +54,7 @@ func (store *PostgresStore) ApplyAcquireLock(
 	err = tx.QueryRow(
 		ctx,
 		`
-		SELECT resposne
+		SELECT response
 		FROM processed_requests
 		WHERE client_id=$1
 		AND request_id=$2
@@ -93,12 +97,7 @@ func (store *PostgresStore) ApplyAcquireLock(
 		}
 		return store.saveAcquireResponse(ctx, tx, req, response)
 	}
-	now := time.Now().Unix()
-	expiry := now + int64(defaultLockTTL/time.Second)
-	lockToken, err := generateLockToken()
-	if err != nil {
-		return fmt.Errorf("generate lock token %w", err)
-	}
+
 	// Acquire the lock only if there is no current lock
 	// or the current lock has expired
 	var acquiredResourceID string
@@ -128,7 +127,7 @@ func (store *PostgresStore) ApplyAcquireLock(
 		req.RequestId,
 		lockToken,
 		expiry,
-		now,
+		observedAt,
 	).Scan(&acquiredResourceID)
 
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -193,12 +192,4 @@ func (store *PostgresStore) saveAcquireResponse(
 		return fmt.Errorf("commit acquire-lock transaction: %w", err)
 	}
 	return nil
-}
-
-func generateLockToken() (string, error) {
-	buffer := make([]byte, 32)
-	if _, err := rand.Read(buffer); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(buffer), nil
 }

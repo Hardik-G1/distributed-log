@@ -66,22 +66,32 @@ func (store *PostgresStore) GetRaftLog(ctx context.Context, index int64) (RaftLo
 	}
 	return log, nil
 }
-
 func (store *PostgresStore) GetRaftEntriesFrom(ctx context.Context, index int64) ([]RaftLog, error) {
-	var logs []RaftLog
+	return store.GetRaftEntriesFromLimit(ctx, index, 0)
+}
+
+func (store *PostgresStore) GetRaftEntriesFromLimit(ctx context.Context, index int64, limit int) ([]RaftLog, error) {
+	query := `
+	SELECT log_index,term,operation_type,operation_payload
+	FROM raft_logs
+	WHERE log_index>=$1
+	ORDER BY log_index ASC
+	`
+	args := []any{index}
+	if limit > 0 {
+		query += ` LIMIT $2`
+		args = append(args, limit)
+	}
 	rows, err := store.pool.Query(ctx,
-		`
-		SELECT log_index,term,operation_type,operation_payload
-		FROM raft_logs
-		WHERE log_index>=$1
-		ORDER BY log_index ASC
-		`,
-		index,
+		query,
+		args...,
 	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	var logs []RaftLog
+
 	for rows.Next() {
 		var log RaftLog
 		err := rows.Scan(&log.LogIndex, &log.Term, &log.OperationType, &log.OperationPayload)

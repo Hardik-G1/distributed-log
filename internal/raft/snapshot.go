@@ -18,7 +18,8 @@ func (node *Node) maybeCreateSnapshot(
 	if ctx == nil {
 		return errors.New("context is nil")
 	}
-
+	node.stateMachineMu.Lock()
+	defer node.stateMachineMu.Unlock()
 	node.stateMu.Lock()
 	lastAppliedIndex := node.state.LastAppliedIndex
 	lastIncludedIndex := node.state.LastIncludedIndex
@@ -79,10 +80,13 @@ func (node *Node) maybeCreateSnapshot(
 	); err != nil {
 		return err
 	}
-	if err := node.store.DeleteRaftEntriesThrough(
+	node.logMu.Lock()
+	err = node.store.DeleteRaftEntriesThrough(
 		ctx,
 		lastAppliedIndex,
-	); err != nil {
+	)
+	node.logMu.Unlock()
+	if err != nil {
 		return err
 	}
 

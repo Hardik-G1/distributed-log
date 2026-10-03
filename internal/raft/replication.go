@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	pb "github.com/Hardik-G1/distributed-log/gen/distributed_log/v1"
 	"github.com/jackc/pgx/v5"
 )
+
+const maxAppendEntriesPerRPC = 256
 
 func (node *Node) replicationLoop(ctx context.Context) {
 	interval := node.config.Heartbeat
@@ -42,9 +45,36 @@ func (node *Node) replicateToPeers(ctx context.Context) {
 	}
 	transport := node.transport
 	node.stateMu.Unlock()
+
 	for _, peerID := range peerIDs {
-		node.replicateToPeer(ctx, transport, peerID)
+		if !node.beginPeerReplication(peerID) {
+			continue
+		}
+		node.replicationWg.Add(1)
+		go func(peerID string) {
+			defer node.replicationWg.Done()
+			defer node.endPeerReplication(peerID)
+			node.replicateToPeer(ctx, transport, peerID)
+		}(peerID)
 	}
+}
+
+func (node *Node) beginPeerReplication(
+	peerID string,
+) bool {
+	node.replicationMu.Lock()
+	defer node.replicationMu.Unlock()
+
+	if node.replicatingPeers[peerID] {
+		return false
+	}
+	node.replicatingPeers[peerID] = true
+	return true
+}
+func (node *Node) endPeerReplication(peerID string) {
+	node.replicationMu.Lock()
+	delete(node.replicatingPeers, peerID)
+	node.replicationMu.Unlock()
 }
 
 func (node *Node) replicateToPeer(
@@ -63,6 +93,9 @@ func (node *Node) replicateToPeer(
 				peerID,
 			)
 		}
+		return
+	}
+	if request == nil {
 		return
 	}
 	response, err := transport.SendAppendEntries(
@@ -104,6 +137,8 @@ func (node *Node) buildAppendEntries(
 	lastIncludedIndex := node.state.LastIncludedIndex
 	lastIncludedTerm := node.state.LastIncludedTerm
 	node.stateMu.Unlock()
+	node.logMu.Lock()
+	defer node.logMu.Unlock()
 	if nextIndex < 1 {
 		nextIndex = 1
 	}
@@ -127,9 +162,10 @@ func (node *Node) buildAppendEntries(
 		prevLogTerm = prevEntry.Term
 	}
 
-	storedEntries, err := node.store.GetRaftEntriesFrom(
+	storedEntries, err := node.store.GetRaftEntriesFromLimit(
 		ctx,
 		nextIndex,
+		maxAppendEntriesPerRPC,
 	)
 	if err != nil {
 		return nil, 0, err
@@ -156,16 +192,19 @@ func (node *Node) handleAppendEntriesResponse(
 	if response == nil {
 		return nil
 	}
-	node.stateMu.Lock()
-	if response.CurrentTerm > node.state.CurrentTerm {
-		err := node.stepDownForTermLocked(ctx, response.CurrentTerm)
-		node.stateMu.Unlock()
+
+	if response.CurrentTerm > sentTerm {
+		err := node.stepDownForTerm(ctx, response.CurrentTerm)
 		if err != nil {
 			return err
 		}
 		node.resetElectionTimer()
+		return &NotLeaderError{}
+	}
+	if response.CurrentTerm < sentTerm {
 		return nil
 	}
+	node.stateMu.Lock()
 	if node.state.Role != RoleLeader || node.state.CurrentTerm != sentTerm {
 		node.stateMu.Unlock()
 		return nil
@@ -179,72 +218,92 @@ func (node *Node) handleAppendEntriesResponse(
 	switch response.AppendStatus {
 	case pb.AppendResponse_APPEND_RESPONSE_SUCCESS:
 		reportedMatchIndex := response.MatchIndex
-		reportedMatchIndex = min(lastSentIndex, reportedMatchIndex)
-		if reportedMatchIndex > progress.MatchIndex {
-			progress.MatchIndex = reportedMatchIndex
+		if reportedMatchIndex < 0 || reportedMatchIndex > lastSentIndex {
+			node.stateMu.Unlock()
+			return fmt.Errorf("invalid match index %d", reportedMatchIndex)
 		}
-
-		progress.NextIndex = progress.MatchIndex + 1
-		node.state.Peers[peerID] = progress
+		if reportedMatchIndex >= progress.MatchIndex {
+			progress.MatchIndex = reportedMatchIndex
+			progress.NextIndex = reportedMatchIndex + 1
+			node.state.Peers[peerID] = progress
+		}
 		node.stateMu.Unlock()
 		return node.advanceCommitIndex(ctx)
 	case pb.AppendResponse_APPEND_RESPONSE_LOG_MISMATCH:
-		if progress.NextIndex > 1 {
+		hintedNextIndex := response.MatchIndex + 1
+		if response.MatchIndex >= 0 && response.MatchIndex < lastSentIndex && hintedNextIndex != progress.NextIndex {
+			progress.NextIndex = hintedNextIndex
+		} else if progress.NextIndex > 1 {
 			progress.NextIndex--
 		}
 		node.state.Peers[peerID] = progress
 		node.stateMu.Unlock()
 		return nil
-	default:
+	case pb.AppendResponse_APPEND_RESPONSE_OLD_TERM:
 		node.stateMu.Unlock()
 		return nil
+	default:
+		node.stateMu.Unlock()
+		return fmt.Errorf("unknown append response status %s", response.AppendStatus.String())
 	}
 }
 
 func (node *Node) advanceCommitIndex(
 	ctx context.Context,
 ) error {
+	if ctx == nil {
+		return errors.New("context is nil")
+	}
+
 	lastLogIndex, _, err := node.lastLogInfo(ctx)
 	if err != nil {
 		return err
 	}
 	node.stateMu.Lock()
+	if node.state.Role != RoleLeader {
+		node.stateMu.Unlock()
+		return nil
+	}
 	currentTerm := node.state.CurrentTerm
 	currentCommitIndex := node.state.CommitIndex
+	matchIndexes := make([]int64, 0, len(node.state.Peers)+1)
+	matchIndexes = append(matchIndexes, lastLogIndex)
 
-	peerProgress := make(map[string]PeerProgress)
-
-	for peerID, progress := range node.state.Peers {
-		peerProgress[peerID] = progress
+	for _, progress := range node.state.Peers {
+		matchIndexes = append(matchIndexes, progress.MatchIndex)
 	}
 	node.stateMu.Unlock()
 
-	for candidate := lastLogIndex; candidate > currentCommitIndex; candidate-- {
-		entry, err := node.store.GetRaftLog(ctx, candidate)
-		if errors.Is(err, pgx.ErrNoRows) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		if entry.Term != currentTerm {
-			continue
-		}
-		replicaCount := 1
-		for _, progress := range peerProgress {
-			if progress.MatchIndex >= candidate {
-				replicaCount++
-			}
-		}
-		if replicaCount >= majority(len(peerProgress)+1) {
-			node.stateMu.Lock()
-			if node.state.Role == RoleLeader && node.state.CurrentTerm == currentTerm && candidate > node.state.CommitIndex {
-				node.state.CommitIndex = candidate
-			}
-			node.stateMu.Unlock()
-			break
+	sort.Slice(matchIndexes, func(i, j int) bool {
+		return matchIndexes[i] < matchIndexes[j]
+	})
+	quorum := majority(len(matchIndexes))
+	candidatePosition := len(matchIndexes) - quorum
+	candidateIndex := matchIndexes[candidatePosition]
+	if candidateIndex <= currentCommitIndex {
+		return nil
+	}
+	entry, err := node.store.GetRaftLog(ctx, candidateIndex)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if entry.Term != currentTerm {
+		return nil
+	}
+	node.stateMu.Lock()
+	defer node.stateMu.Unlock()
 
-		}
+	if node.state.Role != RoleLeader {
+		return nil
+	}
+	if node.state.CurrentTerm != currentTerm {
+		return nil
+	}
+	if candidateIndex > node.state.CommitIndex {
+		node.state.CommitIndex = candidateIndex
 	}
 	return nil
 }
@@ -264,12 +323,12 @@ func (node *Node) sendSnapshotToPeer(
 		return err
 	}
 	node.stateMu.Lock()
-	leaderID := node.state.NodeID
-
 	if node.state.Role != RoleLeader {
+		knownLeaderID := node.state.LeaderID
 		node.stateMu.Unlock()
-		return &NotLeaderError{LeaderID: leaderID}
+		return &NotLeaderError{LeaderID: knownLeaderID}
 	}
+	leaderID := node.state.NodeID
 	leaderTerm := node.state.CurrentTerm
 	node.stateMu.Unlock()
 	sendChunk := func(
@@ -288,11 +347,9 @@ func (node *Node) sendSnapshotToPeer(
 			return errors.New("empty installsnapshot response")
 		}
 		if response.Term > leaderTerm {
-			node.stateMu.Lock()
-			stepDownErr := node.stepDownForTermLocked(
+			stepDownErr := node.stepDownForTerm(
 				ctx, response.Term,
 			)
-			node.stateMu.Unlock()
 
 			if stepDownErr != nil {
 				return stepDownErr

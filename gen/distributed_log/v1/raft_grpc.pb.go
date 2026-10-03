@@ -22,6 +22,7 @@ const (
 	RaftService_RequestVote_FullMethodName     = "/distributed_log.v1.RaftService/RequestVote"
 	RaftService_AppendEntries_FullMethodName   = "/distributed_log.v1.RaftService/AppendEntries"
 	RaftService_InstallSnapshot_FullMethodName = "/distributed_log.v1.RaftService/InstallSnapshot"
+	RaftService_PreVote_FullMethodName         = "/distributed_log.v1.RaftService/PreVote"
 )
 
 // RaftServiceClient is the client API for RaftService service.
@@ -31,6 +32,7 @@ type RaftServiceClient interface {
 	RequestVote(ctx context.Context, in *RequestVoteRequest, opts ...grpc.CallOption) (*RequestVoteResponse, error)
 	AppendEntries(ctx context.Context, in *AppendEntriesRequest, opts ...grpc.CallOption) (*AppendEntriesResponse, error)
 	InstallSnapshot(ctx context.Context, in *InstallSnapshotRequest, opts ...grpc.CallOption) (*InstallSnapshotResponse, error)
+	PreVote(ctx context.Context, in *PreVoteRequest, opts ...grpc.CallOption) (*PreVoteResponse, error)
 }
 
 type raftServiceClient struct {
@@ -71,6 +73,16 @@ func (c *raftServiceClient) InstallSnapshot(ctx context.Context, in *InstallSnap
 	return out, nil
 }
 
+func (c *raftServiceClient) PreVote(ctx context.Context, in *PreVoteRequest, opts ...grpc.CallOption) (*PreVoteResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PreVoteResponse)
+	err := c.cc.Invoke(ctx, RaftService_PreVote_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RaftServiceServer is the server API for RaftService service.
 // All implementations must embed UnimplementedRaftServiceServer
 // for forward compatibility.
@@ -78,6 +90,7 @@ type RaftServiceServer interface {
 	RequestVote(context.Context, *RequestVoteRequest) (*RequestVoteResponse, error)
 	AppendEntries(context.Context, *AppendEntriesRequest) (*AppendEntriesResponse, error)
 	InstallSnapshot(context.Context, *InstallSnapshotRequest) (*InstallSnapshotResponse, error)
+	PreVote(context.Context, *PreVoteRequest) (*PreVoteResponse, error)
 	mustEmbedUnimplementedRaftServiceServer()
 }
 
@@ -96,6 +109,9 @@ func (UnimplementedRaftServiceServer) AppendEntries(context.Context, *AppendEntr
 }
 func (UnimplementedRaftServiceServer) InstallSnapshot(context.Context, *InstallSnapshotRequest) (*InstallSnapshotResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method InstallSnapshot not implemented")
+}
+func (UnimplementedRaftServiceServer) PreVote(context.Context, *PreVoteRequest) (*PreVoteResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PreVote not implemented")
 }
 func (UnimplementedRaftServiceServer) mustEmbedUnimplementedRaftServiceServer() {}
 func (UnimplementedRaftServiceServer) testEmbeddedByValue()                     {}
@@ -172,6 +188,24 @@ func _RaftService_InstallSnapshot_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RaftService_PreVote_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PreVoteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RaftServiceServer).PreVote(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RaftService_PreVote_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RaftServiceServer).PreVote(ctx, req.(*PreVoteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RaftService_ServiceDesc is the grpc.ServiceDesc for RaftService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -190,6 +224,10 @@ var RaftService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "InstallSnapshot",
 			Handler:    _RaftService_InstallSnapshot_Handler,
+		},
+		{
+			MethodName: "PreVote",
+			Handler:    _RaftService_PreVote_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

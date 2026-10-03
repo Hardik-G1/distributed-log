@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"flag"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -52,7 +53,7 @@ func ServerConfigLoad(args []string) (*ServerConfig, error) {
 	electionTimeout := flags.Duration("election-timeout", 500*time.Millisecond, "election timeout")
 	postgresDSN := flags.String("postgres-dsn", "localhost:6001", "the storage location")
 	snapshotThreshold := flags.Int("snapshot-threshold", 10000, "the threshold at the snapshot")
-	snapshotDirectory := flag.String("snapshot-directory", "data/snapshot", "directory for local raft snapshots")
+	snapshotDirectory := flags.String("snapshot-directory", "data/snapshot", "directory for local raft snapshots")
 
 	if err := flags.Parse(args); err != nil {
 		return nil, err
@@ -74,7 +75,15 @@ func ServerConfigLoad(args []string) (*ServerConfig, error) {
 	if *snapshotThreshold <= 0 {
 		return nil, errors.New("snapshot threshold must be positive")
 	}
-
+	if strings.TrimSpace(*snapshotDirectory) == "" {
+		return nil, errors.New("snapshot directory is required")
+	}
+	absoluteSnapshotDirectory, err := filepath.Abs(
+		*snapshotDirectory,
+	)
+	if err != nil {
+		return nil, err
+	}
 	return &ServerConfig{
 		NodeID:            *nodeID,
 		ListenAddr:        *listenAddr,
@@ -83,6 +92,6 @@ func ServerConfigLoad(args []string) (*ServerConfig, error) {
 		ElectionTimeout:   *electionTimeout,
 		PostgresDSN:       *postgresDSN,
 		SnapshotThreshold: *snapshotThreshold,
-		SnapshotDirectory: *snapshotDirectory,
+		SnapshotDirectory: absoluteSnapshotDirectory,
 	}, nil
 }

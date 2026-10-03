@@ -22,6 +22,13 @@ func NewRaftServer(node *raft.Node) (*RaftServer, error) {
 	}, nil
 }
 
+func (server *RaftServer) PreVote(
+	ctx context.Context,
+	req *pb.PreVoteRequest,
+) (*pb.PreVoteResponse, error) {
+	return server.node.HandlePreVote(ctx, req)
+}
+
 func (server *RaftServer) RequestVote(
 	ctx context.Context,
 	req *pb.RequestVoteRequest,

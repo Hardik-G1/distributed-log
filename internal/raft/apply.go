@@ -3,6 +3,7 @@ package raft
 import (
 	"context"
 	"errors"
+	"log"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -18,10 +19,11 @@ func (node *Node) applyLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := node.applyCommitted(ctx); err != nil {
-				return
+				log.Printf("apply loop stopped %v", err)
+				continue
 			}
 			if err := node.maybeCreateSnapshot(ctx); err != nil {
-				return
+				log.Printf("create raft snapshot %v", err)
 			}
 		}
 	}
@@ -40,19 +42,28 @@ func (node *Node) applyCommitted(ctx context.Context) error {
 		if nextIndex > commitIndex {
 			return nil
 		}
+		node.logMu.Lock()
 		entry, err := node.store.GetRaftLog(ctx, nextIndex)
+		node.logMu.Unlock()
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errors.New("committed raft entry is missing")
 		}
 		if err != nil {
 			return err
 		}
-
-		if err := node.stateMachine.Apply(ctx, entry); err != nil {
+		node.stateMachineMu.Lock()
+		err = node.stateMachine.Apply(ctx, entry)
+		if err != nil {
+			node.stateMachineMu.Unlock()
 			return err
 		}
+
 		node.stateMu.Lock()
-		node.state.LastAppliedIndex = nextIndex
+		if nextIndex > node.state.LastAppliedIndex {
+			node.state.LastAppliedIndex = nextIndex
+		}
 		node.stateMu.Unlock()
+		node.stateMachineMu.Unlock()
+
 	}
 }

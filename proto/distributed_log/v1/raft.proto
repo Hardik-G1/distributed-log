@@ -1,6 +1,7 @@
 syntax="proto3";
 
 package distributed_log.v1;
+import "distributed_log/v1/lock.proto";
 
 option go_package="github.com/Hardik-G1/distributed-log/gen/distributed_log/v1;distributedlogv1";
 
@@ -24,16 +25,29 @@ message RequestVoteResponse{
     Vote vote_status=3;
 }
 
+message PreVoteRequest{
+    int64 vote_term=1;
+    int64 candidate_log_index=2;
+    int64 candidate_last_log_term=3;
+    string candidate_id=4;
+    int64 candidate_requested_at=5;
+}
+message PreVoteResponse{
+    int64 vote_term=1;
+    string voter_id=2;
+    Vote vote_status=3;
+}
 enum Operation{
     OPERATION_UNSPECIFIED=0;
     OPERATION_ACQUIRE_LOCK=1;
     OPERATION_RELEASE_LOCK=2;
     OPERATION_APPEND_LOG=3;
+    OPERATION_NOOP=4;
 }
 message LogEntry{
     int64 term=1; // repeated here again as it can be different for old
     Operation operation_type=2;
-    string operation_payload=3;
+    bytes operation_payload=3;
 }
 
 
@@ -84,8 +98,25 @@ message InstallSnapshotResponse{
     SnapshotStatus status=2;
 }
 
+
+message AcquireLockCommand{
+    AcquireLockRequest request=1;
+    string lock_token=2;
+    int64 expiry=3;
+    int64 observed_at=4;
+}
+
+message ReleaseLockCommand{
+    ReleaseLockRequest request=1;
+    int64 observed_at=2;
+}
+message AppendLogCommand{
+    AppendLogRequest request=1;
+    int64 observed_at=2;
+}
 service RaftService{
     rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
     rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
     rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse);
+    rpc PreVote(PreVoteRequest) returns (PreVoteResponse);
 }

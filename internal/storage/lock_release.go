@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	pb "github.com/Hardik-G1/distributed-log/gen/distributed_log/v1"
 	"github.com/jackc/pgx/v5"
@@ -14,6 +13,7 @@ import (
 func (store *PostgresStore) ApplyReleaseLock(
 	ctx context.Context,
 	req *pb.ReleaseLockRequest,
+	observedAt int64,
 ) error {
 	if ctx == nil {
 		return errors.New("context is nil")
@@ -35,6 +35,9 @@ func (store *PostgresStore) ApplyReleaseLock(
 	}
 	if req.LockToken == "" {
 		return errors.New("lock token is empty")
+	}
+	if observedAt <= 0 {
+		return errors.New("observed time is invalid")
 	}
 	tx, err := store.pool.Begin(ctx)
 	if err != nil {
@@ -127,10 +130,9 @@ func (store *PostgresStore) ApplyReleaseLock(
 	if err != nil {
 		return fmt.Errorf("load current lock %w", err)
 	}
-	now := time.Now().Unix()
 	validOwner := ownerID == req.ClientId
 	validToken := lockToken == req.LockToken
-	lockActive := expiry > now
+	lockActive := expiry > observedAt
 	if !validOwner || !validToken || !lockActive {
 		response := &pb.ReleaseLockResponse{
 			ResourceId:    req.ResourceId,

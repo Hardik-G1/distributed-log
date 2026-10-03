@@ -74,12 +74,10 @@ func (node *Node) ReadIndex(ctx context.Context) (int64, error) {
 				return
 			}
 			if response.CurrentTerm > readTerm {
-				node.stateMu.Lock()
-				stepDownErr := node.stepDownForTermLocked(
+				stepDownErr := node.stepDownForTerm(
 					ctx,
 					response.CurrentTerm,
 				)
-				node.stateMu.Unlock()
 				if stepDownErr != nil {
 					resultCh <- stepDownErr
 					return

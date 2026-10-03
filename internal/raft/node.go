@@ -4,21 +4,38 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/Hardik-G1/distributed-log/internal/config"
 	"github.com/Hardik-G1/distributed-log/internal/storage"
 )
 
+type pendingProposal struct {
+	done  chan struct{}
+	entry storage.RaftLog
+	err   error
+}
 type Node struct {
-	stateMu     sync.Mutex
-	lifecycleMu sync.Mutex
-	snapshotMu  sync.Mutex
-	config      *config.ServerConfig
-	store       *storage.PostgresStore
-	state       NodeState
-	ctx         context.Context
-	cancel      context.CancelFunc
-	doneCh      chan struct{}
+	stateMu            sync.Mutex
+	proposalMu         sync.Mutex
+	termMu             sync.Mutex
+	logMu              sync.Mutex
+	pendingMu          sync.Mutex
+	lifecycleMu        sync.Mutex
+	snapshotMu         sync.Mutex
+	stateMachineMu     sync.Mutex
+	replicationMu      sync.Mutex
+	replicatingPeers   map[string]bool
+	replicationWg      sync.WaitGroup
+	installingSnapshot atomic.Bool
+	lastLeaderContact  time.Time
+	config             *config.ServerConfig
+	store              *storage.PostgresStore
+	state              NodeState
+	ctx                context.Context
+	cancel             context.CancelFunc
+	doneCh             chan struct{}
 
 	started          bool
 	stopped          bool
@@ -28,6 +45,7 @@ type Node struct {
 	stateMachine     StateMachine
 	transport        PeerTransport
 	incomingSnapshot *incomingSnapshot
+	pendingProposals map[string]*pendingProposal
 }
 
 func NewNode(
@@ -70,13 +88,15 @@ func NewNode(
 		return nil, errors.New("peer transport is required")
 	}
 	node := &Node{
-		config:          cfg,
-		store:           store,
-		doneCh:          make(chan struct{}),
-		electionResetCh: make(chan struct{}, 1),
-		stateMachine:    stateMachine,
-		transport:       transport,
-		votesGranted:    make(map[string]struct{}),
+		config:           cfg,
+		store:            store,
+		doneCh:           make(chan struct{}),
+		electionResetCh:  make(chan struct{}, 1),
+		stateMachine:     stateMachine,
+		transport:        transport,
+		votesGranted:     make(map[string]struct{}),
+		pendingProposals: make(map[string]*pendingProposal),
+		replicatingPeers: make(map[string]bool),
 		state: NodeState{
 			NodeID:            cfg.NodeID,
 			Role:              RoleFollower,
@@ -128,6 +148,7 @@ func (node *Node) run() {
 	}()
 	<-node.ctx.Done() // 1 waits for the context to be done
 	wg.Wait()
+	node.replicationWg.Wait()
 }
 
 func (node *Node) Stop() {

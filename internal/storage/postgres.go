@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -63,7 +64,7 @@ func createTables(ctx context.Context, pool *pgxpool.Pool) error {
 		CREATE TABLE IF NOT EXISTS raft_metadata(
 			id SMALLINT PRIMARY KEY CHECK (id=1),
 			current_term BIGINT NOT NULL,
-			voted_for TEXT NOT NULL DEFAULT=''
+			voted_for TEXT NOT NULL DEFAULT ''
 		)
 		`,
 			`INSERT INTO raft_metadata(id,current_term,voted_for)
@@ -80,9 +81,9 @@ func createTables(ctx context.Context, pool *pgxpool.Pool) error {
 		`,
 		}
 
-	for _, statement := range statements {
+	for index, statement := range statements {
 		if _, err := pool.Exec(ctx, statement); err != nil {
-			return err
+			return fmt.Errorf("schema statement %d failed %w", index+1, err)
 		}
 	}
 	return nil

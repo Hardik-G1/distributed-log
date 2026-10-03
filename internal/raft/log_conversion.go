@@ -11,7 +11,7 @@ func toProtoLogEntry(entry storage.RaftLog) *pb.LogEntry {
 	return &pb.LogEntry{
 		Term:             entry.Term,
 		OperationType:    pb.Operation(entry.OperationType),
-		OperationPayload: string(entry.OperationPayload),
+		OperationPayload: entry.OperationPayload,
 	}
 }
 
@@ -23,7 +23,7 @@ func fromProtoLogEntry(index int64, entry *pb.LogEntry) (storage.RaftLog, error)
 		LogIndex:         index,
 		Term:             entry.Term,
 		OperationType:    int32(entry.OperationType),
-		OperationPayload: []byte(entry.OperationPayload),
+		OperationPayload: entry.OperationPayload,
 	}, nil
 }
 

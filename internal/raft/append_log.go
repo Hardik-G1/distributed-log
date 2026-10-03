@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	pb "github.com/Hardik-G1/distributed-log/gen/distributed_log/v1"
 	"github.com/Hardik-G1/distributed-log/internal/storage"
@@ -47,7 +48,6 @@ func (node *Node) HandleAppendEntries(
 		return nil, err
 	}
 	node.stateMu.Lock()
-	defer node.stateMu.Unlock()
 
 	response := &pb.AppendEntriesResponse{
 		CurrentTerm:  node.state.CurrentTerm,
@@ -57,26 +57,63 @@ func (node *Node) HandleAppendEntries(
 	//reject stale leader
 	if req.LeaderTerm < node.state.CurrentTerm {
 		response.AppendStatus = pb.AppendResponse_APPEND_RESPONSE_OLD_TERM
+		node.stateMu.Unlock()
 		return response, nil
 	}
-	//a newer term makes this node a follower
-	if req.LeaderTerm > node.state.CurrentTerm {
-		if err := node.stepDownForTermLocked(ctx, req.LeaderTerm); err != nil {
+	previousTerm := node.state.CurrentTerm
+	node.stateMu.Unlock()
+	if req.LeaderTerm > previousTerm {
+		if err := node.stepDownForTerm(ctx, req.LeaderTerm); err != nil {
 			return nil, err
 		}
 	}
+
+	node.stateMu.Lock()
+	if req.LeaderTerm < node.state.CurrentTerm {
+		response.CurrentTerm = node.state.CurrentTerm
+		response.AppendStatus = pb.AppendResponse_APPEND_RESPONSE_OLD_TERM
+		node.stateMu.Unlock()
+		return response, nil
+	}
+
+	//a newer term makes this node a follower
+
 	node.state.Role = RoleFollower
 	node.state.LeaderID = req.SenderId
-	response.CurrentTerm = node.state.CurrentTerm
+	node.lastLeaderContact = time.Now()
 
+	response.CurrentTerm = node.state.CurrentTerm
+	lastIncludedIndex := node.state.LastIncludedIndex
+	lastIncludedTerm := node.state.LastIncludedTerm
+
+	node.stateMu.Unlock()
 	node.resetElectionTimer()
+
+	node.logMu.Lock()
+	defer node.logMu.Unlock()
 
 	if err := node.verifyPreviousEntry(
 		ctx,
 		req.PrevLogIndex,
 		req.PrevLogTerm,
+		lastIncludedIndex,
+		lastIncludedTerm,
 	); err != nil {
 		if errors.Is(err, ErrLogMismatch) {
+			switch {
+			case req.PrevLogIndex < lastIncludedIndex:
+				response.MatchIndex = lastIncludedIndex
+			default:
+				localLastIndex, _, lastErr := node.lastLogInfo(ctx)
+				if lastErr != nil {
+					return nil, lastErr
+				}
+				if req.PrevLogIndex > localLastIndex {
+					response.MatchIndex = localLastIndex
+				} else if req.PrevLogIndex > 0 {
+					response.MatchIndex = req.PrevLogIndex - 1
+				}
+			}
 			response.AppendStatus = pb.AppendResponse_APPEND_RESPONSE_LOG_MISMATCH
 			return response, nil
 		}
@@ -99,12 +136,13 @@ func (node *Node) HandleAppendEntries(
 	if err != nil {
 		return nil, err
 	}
-
+	node.stateMu.Lock()
 	if req.LeaderCommitIndex > node.state.CommitIndex {
-		newCommitIndex := req.LeaderCommitIndex
-		newCommitIndex = min(newCommitIndex, localLastIndex)
-		node.state.CommitIndex = newCommitIndex
+		node.state.CommitIndex = min(req.LeaderCommitIndex, localLastIndex)
 	}
+	node.lastLeaderContact = time.Now()
+	node.stateMu.Unlock()
+	node.resetElectionTimer()
 	response.MatchIndex = lastIndex
 	response.LatestAppendedTerm = lastTerm
 	response.AppendStatus = pb.AppendResponse_APPEND_RESPONSE_SUCCESS
@@ -115,14 +153,12 @@ func (node *Node) verifyPreviousEntry(
 	ctx context.Context,
 	index int64,
 	term int64,
+	lastIncludedIndex int64,
+	lastIncludedTerm int64,
 ) error {
 	if index < 0 {
 		return ErrLogMismatch
 	}
-	node.stateMu.Lock()
-	lastIncludedIndex := node.state.LastIncludedIndex
-	lastIncludedTerm := node.state.LastIncludedTerm
-	node.stateMu.Unlock()
 
 	if index < lastIncludedIndex {
 		return ErrLogMismatch
@@ -192,7 +228,7 @@ func (node *Node) replaceFollowerSuffix(
 			LogIndex:         startIndex,
 			Term:             incoming.Term,
 			OperationType:    int32(incoming.OperationType),
-			OperationPayload: []byte(incoming.OperationPayload),
+			OperationPayload: incoming.OperationPayload,
 		})
 		startIndex++
 	}
