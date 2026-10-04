@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/Hardik-G1/distributed-log/internal/storage"
-	"github.com/jackc/pgx/v5"
 )
 
 func (node *Node) maybeCreateSnapshot(
@@ -18,8 +17,13 @@ func (node *Node) maybeCreateSnapshot(
 	if ctx == nil {
 		return errors.New("context is nil")
 	}
+	node.snapshotMu.Lock()
+	defer node.snapshotMu.Unlock()
+	provider, ok := node.stateMachine.(SnapshotProvider)
+	if !ok {
+		return errors.New("state machine does not support snapshot")
+	}
 	node.stateMachineMu.Lock()
-	defer node.stateMachineMu.Unlock()
 	node.stateMu.Lock()
 	lastAppliedIndex := node.state.LastAppliedIndex
 	lastIncludedIndex := node.state.LastIncludedIndex
@@ -28,29 +32,33 @@ func (node *Node) maybeCreateSnapshot(
 	node.stateMu.Unlock()
 
 	if threshold <= 0 {
+		node.stateMachineMu.Unlock()
 		return nil
 	}
 	if lastAppliedIndex-lastIncludedIndex < int64(threshold) {
+		node.stateMachineMu.Unlock()
 		return nil
 	}
 
-	provider, ok := node.stateMachine.(SnapshotProvider)
-	if !ok {
-		return errors.New("state machine does not support snapshot")
-	}
+	node.logMu.Lock()
 
-	lastEntry, err := node.store.GetRaftLog(
-		ctx,
-		lastAppliedIndex,
-	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return errors.New("snapshot boundary log entry is missing")
+	lastEntry, cached := node.cachedRaftLogLocked(lastAppliedIndex)
+	if !cached {
+		var err error
+		lastEntry, err = node.store.GetRaftLog(ctx, lastAppliedIndex)
+		if err != nil {
+			node.logMu.Unlock()
+			node.stateMachineMu.Unlock()
+			if errors.Is(err, storage.ErrNotFound) {
+				return errors.New("snapshot boundary log entry is missing")
+			}
+			return err
+		}
 	}
-	if err != nil {
-		return err
-	}
+	node.logMu.Unlock()
 
 	data, err := provider.Snapshot(ctx)
+	node.stateMachineMu.Unlock()
 	if err != nil {
 		return err
 	}
@@ -85,14 +93,19 @@ func (node *Node) maybeCreateSnapshot(
 		ctx,
 		lastAppliedIndex,
 	)
+	if err == nil {
+		node.discardCachedRaftLogsThroughLocked(lastAppliedIndex)
+	}
 	node.logMu.Unlock()
 	if err != nil {
 		return err
 	}
 
 	node.stateMu.Lock()
-	node.state.LastIncludedIndex = lastAppliedIndex
-	node.state.LastIncludedTerm = lastEntry.Term
+	if lastAppliedIndex > node.state.LastIncludedIndex {
+		node.state.LastIncludedIndex = lastAppliedIndex
+		node.state.LastIncludedTerm = lastEntry.Term
+	}
 	node.stateMu.Unlock()
 	return nil
 

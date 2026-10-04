@@ -114,6 +114,59 @@ message AppendLogCommand{
     AppendLogRequest request=1;
     int64 observed_at=2;
 }
+message StoredRaftLog{
+    int64 log_index=1;
+    int64 term=2;
+    Operation operation_type=3;
+    bytes operation_payload=4;
+}
+
+message StoredRaftMetadata{
+    int64 current_term=1;
+    string voted_for=2;
+}
+
+message StoredRaftSnapshot{
+    string snapshot_id=1;
+    int64 last_included_index=2;
+    int64 last_included_term=3;
+    string location=4;
+    int64 created_at_unix_nano=5;
+}
+
+message StoredCurrentLock{
+    string resource_id=1;
+    string owner_id=2;
+    string request_id=3;
+    string lock_token=4;
+    int64 expiry=5;
+}
+
+message StoredProcessedRequest{
+    string client_id=1;
+    string request_id=2;
+    string resource_id=3;
+    bytes response=4;
+    int64 created_at_unix_nano=5;
+}
+message StoredResourceLocation{
+    string resource_id=1;
+    string location=2;
+}
+
+message StoredApplicationLog{
+    string resource_id=1;
+    repeated string messages=2;
+}
+message MemoryApplicationStateSnapshot{
+    uint32 version=1;
+    repeated StoredCurrentLock current_locks=2;
+    repeated StoredProcessedRequest processed_requests=3;
+    repeated StoredResourceLocation resource_locations=4;
+    repeated StoredApplicationLog logs=5;
+    int64 last_applied_index=6;
+}
+
 service RaftService{
     rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
     rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);

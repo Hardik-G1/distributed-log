@@ -11,17 +11,20 @@ import (
 	pb "github.com/Hardik-G1/distributed-log/gen/distributed_log/v1"
 	"github.com/Hardik-G1/distributed-log/internal/raft"
 	"github.com/Hardik-G1/distributed-log/internal/storage"
-	"github.com/jackc/pgx/v5"
 	"google.golang.org/protobuf/proto"
 )
 
+type LockResponseStore interface {
+	GetProcessedRequest(ctx context.Context, clientID string, requestID string) (storage.ProcessedRequest, error)
+	ReadApplicationLog(ctx context.Context, resourceID string, position int64, length int64) (string, error)
+}
 type LockServer struct {
 	pb.UnimplementedLockServiceServer
 	node  *raft.Node
-	store *storage.PostgresStore
+	store LockResponseStore
 }
 
-func NewLockServer(node *raft.Node, store *storage.PostgresStore) (*LockServer, error) {
+func NewLockServer(node *raft.Node, store LockResponseStore) (*LockServer, error) {
 	if node == nil {
 		return nil, errors.New("raft node is nil")
 	}
@@ -292,7 +295,7 @@ func (ls *LockServer) GetLogData(
 		req.LogPosition,
 		req.Length,
 	)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, storage.ErrNotFound) {
 		response.Status = pb.GetStatus_GET_STATUS_INVALID_RESOURCE
 		return response, nil
 	}
@@ -328,7 +331,7 @@ func (ls *LockServer) loadProcessedResponse(
 		clientID,
 		requestID,
 	)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, storage.ErrNotFound) {
 		return false, nil
 	}
 	if err != nil {

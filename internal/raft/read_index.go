@@ -5,23 +5,70 @@ import (
 	"errors"
 
 	pb "github.com/Hardik-G1/distributed-log/gen/distributed_log/v1"
+	"github.com/Hardik-G1/distributed-log/internal/storage"
 )
+
+func (node *Node) waitForCurrentTermCommit(ctx context.Context) (int64, int64, error) {
+	for {
+		node.stateMu.Lock()
+		if node.state.Role != RoleLeader {
+			leaderID := node.state.LeaderID
+			node.stateMu.Unlock()
+			return 0, 0, &NotLeaderError{LeaderID: leaderID}
+		}
+		term := node.state.CurrentTerm
+		commitIndex := node.state.CommitIndex
+		lastIncludedIndex := node.state.LastIncludedIndex
+		lastIncludedTerm := node.state.LastIncludedTerm
+		waitCh := node.commitWaitCh
+		node.stateMu.Unlock()
+		committedTerm := int64(-1)
+		switch {
+		case commitIndex == lastIncludedIndex:
+			committedTerm = lastIncludedTerm
+		case commitIndex > lastIncludedIndex:
+			node.logMu.Lock()
+			entry, cached := node.cachedRaftLogLocked(commitIndex)
+			var err error
+			if !cached {
+				entry, err = node.store.GetRaftLog(ctx, commitIndex)
+			}
+			node.logMu.Unlock()
+			if err != nil {
+				if errors.Is(err, storage.ErrNotFound) {
+					return 0, 0, errors.New("committed raft entry is missing")
+				}
+				return 0, 0, err
+			}
+			committedTerm = entry.Term
+		}
+		if committedTerm == term {
+			return term, commitIndex, nil
+		}
+		select {
+		case <-ctx.Done():
+			return 0, 0, ctx.Err()
+		case <-waitCh:
+		}
+	}
+}
 
 func (node *Node) ReadIndex(ctx context.Context) (int64, error) {
 	if ctx == nil {
 		return 0, errors.New("context is nil")
 	}
+	readTerm, readIndex, err := node.waitForCurrentTermCommit(ctx)
+	if err != nil {
+		return 0, err
+	}
 	node.stateMu.Lock()
-	if node.state.Role != RoleLeader {
+	if node.state.Role != RoleLeader || node.state.CurrentTerm != readTerm {
 		leaderID := node.state.LeaderID
 		node.stateMu.Unlock()
 		return 0, &NotLeaderError{
 			LeaderID: leaderID,
 		}
 	}
-
-	readTerm := node.state.CurrentTerm
-	readIndex := node.state.CommitIndex
 	peerIDs := make([]string, 0, len(node.state.Peers))
 	for peerID := range node.state.Peers {
 		peerIDs = append(peerIDs, peerID)

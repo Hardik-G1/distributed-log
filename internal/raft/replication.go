@@ -8,10 +8,13 @@ import (
 	"time"
 
 	pb "github.com/Hardik-G1/distributed-log/gen/distributed_log/v1"
-	"github.com/jackc/pgx/v5"
+	"github.com/Hardik-G1/distributed-log/internal/storage"
 )
 
-const maxAppendEntriesPerRPC = 256
+const (
+	maxAppendEntriesPerRPC = 1024
+	snapshotChunkSize      = 64 * 1024
+)
 
 func (node *Node) replicationLoop(ctx context.Context) {
 	interval := node.config.Heartbeat
@@ -28,75 +31,74 @@ func (node *Node) replicationLoop(ctx context.Context) {
 			return
 		// interval out
 		case <-ticker.C:
-			node.replicateToPeers(ctx)
+			node.replicateToPeers()
+		case <-node.replicationCh:
+			node.replicateToPeers()
 		}
 	}
 }
 
-func (node *Node) replicateToPeers(ctx context.Context) {
+func (node *Node) signalReplication() {
+	select {
+	case node.replicationCh <- struct{}{}:
+	default:
+	}
+}
+
+func (node *Node) replicateToPeers() {
 	node.stateMu.Lock()
 	if node.state.Role != RoleLeader || node.transport == nil {
 		node.stateMu.Unlock()
 		return
 	}
-	peerIDs := make([]string, 0, len(node.state.Peers))
-	for peerID := range node.state.Peers {
-		peerIDs = append(peerIDs, peerID)
-	}
-	transport := node.transport
 	node.stateMu.Unlock()
-
-	for _, peerID := range peerIDs {
-		if !node.beginPeerReplication(peerID) {
-			continue
+	for _, wakeCh := range node.peerReplicationCh {
+		select {
+		case wakeCh <- struct{}{}:
+		default:
 		}
-		node.replicationWg.Add(1)
-		go func(peerID string) {
-			defer node.replicationWg.Done()
-			defer node.endPeerReplication(peerID)
-			node.replicateToPeer(ctx, transport, peerID)
-		}(peerID)
 	}
 }
-
-func (node *Node) beginPeerReplication(
+func (node *Node) replicationPeerLoop(
+	ctx context.Context,
 	peerID string,
-) bool {
-	node.replicationMu.Lock()
-	defer node.replicationMu.Unlock()
-
-	if node.replicatingPeers[peerID] {
-		return false
+	wakeCh <-chan struct{},
+) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-wakeCh:
+			for node.replicateToPeer(
+				ctx,
+				node.transport,
+				peerID,
+			) {
+			}
+		}
 	}
-	node.replicatingPeers[peerID] = true
-	return true
-}
-func (node *Node) endPeerReplication(peerID string) {
-	node.replicationMu.Lock()
-	delete(node.replicatingPeers, peerID)
-	node.replicationMu.Unlock()
 }
 
 func (node *Node) replicateToPeer(
 	ctx context.Context,
 	transport PeerTransport,
 	peerID string,
-) {
+) bool {
 	request, leaderTerm, err := node.buildAppendEntries(
 		ctx, peerID,
 	)
 	if err != nil {
 		if errors.Is(err, ErrSnapshotRequired) {
-			_ = node.sendSnapshotToPeer(
+			return node.sendSnapshotToPeer(
 				ctx,
 				transport,
 				peerID,
-			)
+			) == nil
 		}
-		return
+		return false
 	}
 	if request == nil {
-		return
+		return false
 	}
 	response, err := transport.SendAppendEntries(
 		ctx,
@@ -104,17 +106,28 @@ func (node *Node) replicateToPeer(
 		request,
 	)
 	if err != nil {
-		return
+		return false
 	}
 	lastSentIndex := request.PrevLogIndex + int64(len(request.Entries))
-	_ = node.handleAppendEntriesResponse(
+	if err := node.handleAppendEntriesResponse(
 		ctx,
 		peerID,
 		leaderTerm,
 		lastSentIndex,
 		response,
-	)
-
+	); err != nil {
+		return false
+	}
+	if response == nil {
+		return false
+	}
+	if response.AppendStatus == pb.AppendResponse_APPEND_RESPONSE_LOG_MISMATCH {
+		node.stateMu.Lock()
+		progress, exists := node.state.Peers[peerID]
+		node.stateMu.Unlock()
+		return exists && progress.NextIndex < request.PrevLogIndex+1
+	}
+	return response.AppendStatus == pb.AppendResponse_APPEND_RESPONSE_SUCCESS && len(request.Entries) == maxAppendEntriesPerRPC
 }
 func (node *Node) buildAppendEntries(
 	ctx context.Context,
@@ -152,29 +165,36 @@ func (node *Node) buildAppendEntries(
 	if prevLogIndex == lastIncludedIndex {
 		prevLogTerm = lastIncludedTerm
 	} else if prevLogIndex > lastIncludedIndex {
-		prevEntry, err := node.store.GetRaftLog(ctx, prevLogIndex)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, 0, ErrSnapshotRequired
-		}
-		if err != nil {
-			return nil, 0, err
+		prevEntry, cached := node.cachedRaftLogLocked(prevLogIndex)
+		if !cached {
+			var err error
+			prevEntry, err = node.store.GetRaftLog(ctx, prevLogIndex)
+			if errors.Is(err, storage.ErrNotFound) {
+				return nil, 0, ErrSnapshotRequired
+			}
+			if err != nil {
+				return nil, 0, err
+			}
 		}
 		prevLogTerm = prevEntry.Term
 	}
 
-	storedEntries, err := node.store.GetRaftEntriesFromLimit(
-		ctx,
+	entries, cached := node.cachedRaftEntriesLocked(
 		nextIndex,
 		maxAppendEntriesPerRPC,
 	)
-	if err != nil {
-		return nil, 0, err
+	if !cached {
+		var err error
+		entries, err = node.store.GetRaftEntriesFromLimit(ctx, nextIndex, maxAppendEntriesPerRPC)
+		if err != nil {
+			return nil, 0, err
+		}
 	}
 	request := &pb.AppendEntriesRequest{
 		SenderId:          leaderID,
 		PrevLogIndex:      prevLogIndex,
 		PrevLogTerm:       prevLogTerm,
-		Entries:           toProtoLogEntries(storedEntries),
+		Entries:           toProtoLogEntries(entries),
 		LeaderTerm:        leaderTerm,
 		LeaderCommitIndex: leaderCommitIndex,
 		RequestSentAt:     time.Now().Unix(),
@@ -192,8 +212,10 @@ func (node *Node) handleAppendEntriesResponse(
 	if response == nil {
 		return nil
 	}
-
-	if response.CurrentTerm > sentTerm {
+	node.stateMu.Lock()
+	currentTerm := node.state.CurrentTerm
+	node.stateMu.Unlock()
+	if response.CurrentTerm > currentTerm {
 		err := node.stepDownForTerm(ctx, response.CurrentTerm)
 		if err != nil {
 			return err
@@ -201,7 +223,7 @@ func (node *Node) handleAppendEntriesResponse(
 		node.resetElectionTimer()
 		return &NotLeaderError{}
 	}
-	if response.CurrentTerm < sentTerm {
+	if response.CurrentTerm != sentTerm {
 		return nil
 	}
 	node.stateMu.Lock()
@@ -254,21 +276,15 @@ func (node *Node) advanceCommitIndex(
 	if ctx == nil {
 		return errors.New("context is nil")
 	}
+	node.logMu.Lock()
+	lastLogIndex := node.lastLogIndex
+	node.logMu.Unlock()
 
-	lastLogIndex, _, err := node.lastLogInfo(ctx)
-	if err != nil {
-		return err
-	}
 	node.stateMu.Lock()
-	if node.state.Role != RoleLeader {
-		node.stateMu.Unlock()
-		return nil
-	}
 	currentTerm := node.state.CurrentTerm
 	currentCommitIndex := node.state.CommitIndex
-	matchIndexes := make([]int64, 0, len(node.state.Peers)+1)
-	matchIndexes = append(matchIndexes, lastLogIndex)
-
+	matchIndexes := make([]int64, 1, len(node.state.Peers)+1)
+	matchIndexes[0] = lastLogIndex
 	for _, progress := range node.state.Peers {
 		matchIndexes = append(matchIndexes, progress.MatchIndex)
 	}
@@ -278,37 +294,45 @@ func (node *Node) advanceCommitIndex(
 		return matchIndexes[i] < matchIndexes[j]
 	})
 	quorum := majority(len(matchIndexes))
-	candidatePosition := len(matchIndexes) - quorum
-	candidateIndex := matchIndexes[candidatePosition]
-	if candidateIndex <= currentCommitIndex {
+	majorityPosition := len(matchIndexes) - quorum
+	majorityIndex := matchIndexes[majorityPosition]
+	if majorityIndex <= currentCommitIndex {
 		return nil
 	}
-	entry, err := node.store.GetRaftLog(ctx, candidateIndex)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if entry.Term != currentTerm {
-		return nil
-	}
-	node.stateMu.Lock()
-	defer node.stateMu.Unlock()
+	for candidate := majorityIndex; candidate > currentCommitIndex; candidate-- {
+		node.logMu.Lock()
+		entry, cached := node.cachedRaftLogLocked(candidate)
+		if !cached {
+			var err error
+			entry, err = node.store.GetRaftLog(ctx, candidate)
+			if errors.Is(err, storage.ErrNotFound) {
+				node.logMu.Unlock()
+				continue
+			}
+			if err != nil {
+				node.logMu.Unlock()
+				return err
+			}
+		}
+		node.logMu.Unlock()
 
-	if node.state.Role != RoleLeader {
-		return nil
-	}
-	if node.state.CurrentTerm != currentTerm {
-		return nil
-	}
-	if candidateIndex > node.state.CommitIndex {
-		node.state.CommitIndex = candidateIndex
+		if entry.Term != currentTerm {
+			continue
+		}
+		node.stateMu.Lock()
+		if node.state.Role == RoleLeader &&
+			node.state.CurrentTerm == currentTerm &&
+			candidate > node.state.CommitIndex {
+			node.state.CommitIndex = candidate
+			node.notifyCommitLocked()
+		}
+		node.stateMu.Unlock()
+		break
+
 	}
 	return nil
-}
 
-const snapshotChunkSize = 64 * 1024
+}
 
 func (node *Node) sendSnapshotToPeer(
 	ctx context.Context,
@@ -316,7 +340,7 @@ func (node *Node) sendSnapshotToPeer(
 	peerID string,
 ) error {
 	snapshot, data, err := node.store.LoadLatestSnapshot(ctx)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, storage.ErrNotFound) {
 		return errors.New("no snapshot is available")
 	}
 	if err != nil {
@@ -346,7 +370,11 @@ func (node *Node) sendSnapshotToPeer(
 		if response == nil {
 			return errors.New("empty installsnapshot response")
 		}
-		if response.Term > leaderTerm {
+		node.stateMu.Lock()
+		currentTerm := node.state.CurrentTerm
+		stillLeader := node.state.Role == RoleLeader && currentTerm == leaderTerm
+		node.stateMu.Unlock()
+		if response.Term > currentTerm {
 			stepDownErr := node.stepDownForTerm(
 				ctx, response.Term,
 			)
@@ -357,7 +385,9 @@ func (node *Node) sendSnapshotToPeer(
 			node.resetElectionTimer()
 			return &NotLeaderError{}
 		}
-
+		if !stillLeader {
+			return &NotLeaderError{}
+		}
 		switch response.Status {
 		case pb.SnapshotStatus_SNAPSHOT_STATUS_ACCEPTED:
 			if finalChunk {
@@ -420,6 +450,10 @@ func (node *Node) sendSnapshotToPeer(
 
 	node.stateMu.Lock()
 	defer node.stateMu.Unlock()
+
+	if node.state.Role != RoleLeader || node.state.CurrentTerm != leaderTerm {
+		return &NotLeaderError{LeaderID: node.state.LeaderID}
+	}
 
 	progress, exists := node.state.Peers[peerID]
 	if !exists {

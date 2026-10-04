@@ -1043,6 +1043,542 @@ func (x *AppendLogCommand) GetObservedAt() int64 {
 	return 0
 }
 
+type StoredRaftLog struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	LogIndex         int64                  `protobuf:"varint,1,opt,name=log_index,json=logIndex,proto3" json:"log_index,omitempty"`
+	Term             int64                  `protobuf:"varint,2,opt,name=term,proto3" json:"term,omitempty"`
+	OperationType    Operation              `protobuf:"varint,3,opt,name=operation_type,json=operationType,proto3,enum=distributed_log.v1.Operation" json:"operation_type,omitempty"`
+	OperationPayload []byte                 `protobuf:"bytes,4,opt,name=operation_payload,json=operationPayload,proto3" json:"operation_payload,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *StoredRaftLog) Reset() {
+	*x = StoredRaftLog{}
+	mi := &file_distributed_log_v1_raft_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StoredRaftLog) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StoredRaftLog) ProtoMessage() {}
+
+func (x *StoredRaftLog) ProtoReflect() protoreflect.Message {
+	mi := &file_distributed_log_v1_raft_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StoredRaftLog.ProtoReflect.Descriptor instead.
+func (*StoredRaftLog) Descriptor() ([]byte, []int) {
+	return file_distributed_log_v1_raft_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *StoredRaftLog) GetLogIndex() int64 {
+	if x != nil {
+		return x.LogIndex
+	}
+	return 0
+}
+
+func (x *StoredRaftLog) GetTerm() int64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *StoredRaftLog) GetOperationType() Operation {
+	if x != nil {
+		return x.OperationType
+	}
+	return Operation_OPERATION_UNSPECIFIED
+}
+
+func (x *StoredRaftLog) GetOperationPayload() []byte {
+	if x != nil {
+		return x.OperationPayload
+	}
+	return nil
+}
+
+type StoredRaftMetadata struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	CurrentTerm   int64                  `protobuf:"varint,1,opt,name=current_term,json=currentTerm,proto3" json:"current_term,omitempty"`
+	VotedFor      string                 `protobuf:"bytes,2,opt,name=voted_for,json=votedFor,proto3" json:"voted_for,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StoredRaftMetadata) Reset() {
+	*x = StoredRaftMetadata{}
+	mi := &file_distributed_log_v1_raft_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StoredRaftMetadata) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StoredRaftMetadata) ProtoMessage() {}
+
+func (x *StoredRaftMetadata) ProtoReflect() protoreflect.Message {
+	mi := &file_distributed_log_v1_raft_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StoredRaftMetadata.ProtoReflect.Descriptor instead.
+func (*StoredRaftMetadata) Descriptor() ([]byte, []int) {
+	return file_distributed_log_v1_raft_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *StoredRaftMetadata) GetCurrentTerm() int64 {
+	if x != nil {
+		return x.CurrentTerm
+	}
+	return 0
+}
+
+func (x *StoredRaftMetadata) GetVotedFor() string {
+	if x != nil {
+		return x.VotedFor
+	}
+	return ""
+}
+
+type StoredRaftSnapshot struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	SnapshotId        string                 `protobuf:"bytes,1,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
+	LastIncludedIndex int64                  `protobuf:"varint,2,opt,name=last_included_index,json=lastIncludedIndex,proto3" json:"last_included_index,omitempty"`
+	LastIncludedTerm  int64                  `protobuf:"varint,3,opt,name=last_included_term,json=lastIncludedTerm,proto3" json:"last_included_term,omitempty"`
+	Location          string                 `protobuf:"bytes,4,opt,name=location,proto3" json:"location,omitempty"`
+	CreatedAtUnixNano int64                  `protobuf:"varint,5,opt,name=created_at_unix_nano,json=createdAtUnixNano,proto3" json:"created_at_unix_nano,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *StoredRaftSnapshot) Reset() {
+	*x = StoredRaftSnapshot{}
+	mi := &file_distributed_log_v1_raft_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StoredRaftSnapshot) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StoredRaftSnapshot) ProtoMessage() {}
+
+func (x *StoredRaftSnapshot) ProtoReflect() protoreflect.Message {
+	mi := &file_distributed_log_v1_raft_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StoredRaftSnapshot.ProtoReflect.Descriptor instead.
+func (*StoredRaftSnapshot) Descriptor() ([]byte, []int) {
+	return file_distributed_log_v1_raft_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *StoredRaftSnapshot) GetSnapshotId() string {
+	if x != nil {
+		return x.SnapshotId
+	}
+	return ""
+}
+
+func (x *StoredRaftSnapshot) GetLastIncludedIndex() int64 {
+	if x != nil {
+		return x.LastIncludedIndex
+	}
+	return 0
+}
+
+func (x *StoredRaftSnapshot) GetLastIncludedTerm() int64 {
+	if x != nil {
+		return x.LastIncludedTerm
+	}
+	return 0
+}
+
+func (x *StoredRaftSnapshot) GetLocation() string {
+	if x != nil {
+		return x.Location
+	}
+	return ""
+}
+
+func (x *StoredRaftSnapshot) GetCreatedAtUnixNano() int64 {
+	if x != nil {
+		return x.CreatedAtUnixNano
+	}
+	return 0
+}
+
+type StoredCurrentLock struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ResourceId    string                 `protobuf:"bytes,1,opt,name=resource_id,json=resourceId,proto3" json:"resource_id,omitempty"`
+	OwnerId       string                 `protobuf:"bytes,2,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"`
+	RequestId     string                 `protobuf:"bytes,3,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	LockToken     string                 `protobuf:"bytes,4,opt,name=lock_token,json=lockToken,proto3" json:"lock_token,omitempty"`
+	Expiry        int64                  `protobuf:"varint,5,opt,name=expiry,proto3" json:"expiry,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StoredCurrentLock) Reset() {
+	*x = StoredCurrentLock{}
+	mi := &file_distributed_log_v1_raft_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StoredCurrentLock) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StoredCurrentLock) ProtoMessage() {}
+
+func (x *StoredCurrentLock) ProtoReflect() protoreflect.Message {
+	mi := &file_distributed_log_v1_raft_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StoredCurrentLock.ProtoReflect.Descriptor instead.
+func (*StoredCurrentLock) Descriptor() ([]byte, []int) {
+	return file_distributed_log_v1_raft_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *StoredCurrentLock) GetResourceId() string {
+	if x != nil {
+		return x.ResourceId
+	}
+	return ""
+}
+
+func (x *StoredCurrentLock) GetOwnerId() string {
+	if x != nil {
+		return x.OwnerId
+	}
+	return ""
+}
+
+func (x *StoredCurrentLock) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *StoredCurrentLock) GetLockToken() string {
+	if x != nil {
+		return x.LockToken
+	}
+	return ""
+}
+
+func (x *StoredCurrentLock) GetExpiry() int64 {
+	if x != nil {
+		return x.Expiry
+	}
+	return 0
+}
+
+type StoredProcessedRequest struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	ClientId          string                 `protobuf:"bytes,1,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
+	RequestId         string                 `protobuf:"bytes,2,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	ResourceId        string                 `protobuf:"bytes,3,opt,name=resource_id,json=resourceId,proto3" json:"resource_id,omitempty"`
+	Response          []byte                 `protobuf:"bytes,4,opt,name=response,proto3" json:"response,omitempty"`
+	CreatedAtUnixNano int64                  `protobuf:"varint,5,opt,name=created_at_unix_nano,json=createdAtUnixNano,proto3" json:"created_at_unix_nano,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *StoredProcessedRequest) Reset() {
+	*x = StoredProcessedRequest{}
+	mi := &file_distributed_log_v1_raft_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StoredProcessedRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StoredProcessedRequest) ProtoMessage() {}
+
+func (x *StoredProcessedRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_distributed_log_v1_raft_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StoredProcessedRequest.ProtoReflect.Descriptor instead.
+func (*StoredProcessedRequest) Descriptor() ([]byte, []int) {
+	return file_distributed_log_v1_raft_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *StoredProcessedRequest) GetClientId() string {
+	if x != nil {
+		return x.ClientId
+	}
+	return ""
+}
+
+func (x *StoredProcessedRequest) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *StoredProcessedRequest) GetResourceId() string {
+	if x != nil {
+		return x.ResourceId
+	}
+	return ""
+}
+
+func (x *StoredProcessedRequest) GetResponse() []byte {
+	if x != nil {
+		return x.Response
+	}
+	return nil
+}
+
+func (x *StoredProcessedRequest) GetCreatedAtUnixNano() int64 {
+	if x != nil {
+		return x.CreatedAtUnixNano
+	}
+	return 0
+}
+
+type StoredResourceLocation struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ResourceId    string                 `protobuf:"bytes,1,opt,name=resource_id,json=resourceId,proto3" json:"resource_id,omitempty"`
+	Location      string                 `protobuf:"bytes,2,opt,name=location,proto3" json:"location,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StoredResourceLocation) Reset() {
+	*x = StoredResourceLocation{}
+	mi := &file_distributed_log_v1_raft_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StoredResourceLocation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StoredResourceLocation) ProtoMessage() {}
+
+func (x *StoredResourceLocation) ProtoReflect() protoreflect.Message {
+	mi := &file_distributed_log_v1_raft_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StoredResourceLocation.ProtoReflect.Descriptor instead.
+func (*StoredResourceLocation) Descriptor() ([]byte, []int) {
+	return file_distributed_log_v1_raft_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *StoredResourceLocation) GetResourceId() string {
+	if x != nil {
+		return x.ResourceId
+	}
+	return ""
+}
+
+func (x *StoredResourceLocation) GetLocation() string {
+	if x != nil {
+		return x.Location
+	}
+	return ""
+}
+
+type StoredApplicationLog struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ResourceId    string                 `protobuf:"bytes,1,opt,name=resource_id,json=resourceId,proto3" json:"resource_id,omitempty"`
+	Messages      []string               `protobuf:"bytes,2,rep,name=messages,proto3" json:"messages,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StoredApplicationLog) Reset() {
+	*x = StoredApplicationLog{}
+	mi := &file_distributed_log_v1_raft_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StoredApplicationLog) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StoredApplicationLog) ProtoMessage() {}
+
+func (x *StoredApplicationLog) ProtoReflect() protoreflect.Message {
+	mi := &file_distributed_log_v1_raft_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StoredApplicationLog.ProtoReflect.Descriptor instead.
+func (*StoredApplicationLog) Descriptor() ([]byte, []int) {
+	return file_distributed_log_v1_raft_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *StoredApplicationLog) GetResourceId() string {
+	if x != nil {
+		return x.ResourceId
+	}
+	return ""
+}
+
+func (x *StoredApplicationLog) GetMessages() []string {
+	if x != nil {
+		return x.Messages
+	}
+	return nil
+}
+
+type MemoryApplicationStateSnapshot struct {
+	state             protoimpl.MessageState    `protogen:"open.v1"`
+	Version           uint32                    `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
+	CurrentLocks      []*StoredCurrentLock      `protobuf:"bytes,2,rep,name=current_locks,json=currentLocks,proto3" json:"current_locks,omitempty"`
+	ProcessedRequests []*StoredProcessedRequest `protobuf:"bytes,3,rep,name=processed_requests,json=processedRequests,proto3" json:"processed_requests,omitempty"`
+	ResourceLocations []*StoredResourceLocation `protobuf:"bytes,4,rep,name=resource_locations,json=resourceLocations,proto3" json:"resource_locations,omitempty"`
+	Logs              []*StoredApplicationLog   `protobuf:"bytes,5,rep,name=logs,proto3" json:"logs,omitempty"`
+	LastAppliedIndex  int64                     `protobuf:"varint,6,opt,name=last_applied_index,json=lastAppliedIndex,proto3" json:"last_applied_index,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *MemoryApplicationStateSnapshot) Reset() {
+	*x = MemoryApplicationStateSnapshot{}
+	mi := &file_distributed_log_v1_raft_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MemoryApplicationStateSnapshot) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MemoryApplicationStateSnapshot) ProtoMessage() {}
+
+func (x *MemoryApplicationStateSnapshot) ProtoReflect() protoreflect.Message {
+	mi := &file_distributed_log_v1_raft_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MemoryApplicationStateSnapshot.ProtoReflect.Descriptor instead.
+func (*MemoryApplicationStateSnapshot) Descriptor() ([]byte, []int) {
+	return file_distributed_log_v1_raft_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *MemoryApplicationStateSnapshot) GetVersion() uint32 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+func (x *MemoryApplicationStateSnapshot) GetCurrentLocks() []*StoredCurrentLock {
+	if x != nil {
+		return x.CurrentLocks
+	}
+	return nil
+}
+
+func (x *MemoryApplicationStateSnapshot) GetProcessedRequests() []*StoredProcessedRequest {
+	if x != nil {
+		return x.ProcessedRequests
+	}
+	return nil
+}
+
+func (x *MemoryApplicationStateSnapshot) GetResourceLocations() []*StoredResourceLocation {
+	if x != nil {
+		return x.ResourceLocations
+	}
+	return nil
+}
+
+func (x *MemoryApplicationStateSnapshot) GetLogs() []*StoredApplicationLog {
+	if x != nil {
+		return x.Logs
+	}
+	return nil
+}
+
+func (x *MemoryApplicationStateSnapshot) GetLastAppliedIndex() int64 {
+	if x != nil {
+		return x.LastAppliedIndex
+	}
+	return 0
+}
+
 var File_distributed_log_v1_raft_proto protoreflect.FileDescriptor
 
 const file_distributed_log_v1_raft_proto_rawDesc = "" +
@@ -1114,7 +1650,54 @@ const file_distributed_log_v1_raft_proto_rawDesc = "" +
 	"\x10AppendLogCommand\x12>\n" +
 	"\arequest\x18\x01 \x01(\v2$.distributed_log.v1.AppendLogRequestR\arequest\x12\x1f\n" +
 	"\vobserved_at\x18\x02 \x01(\x03R\n" +
-	"observedAt*A\n" +
+	"observedAt\"\xb3\x01\n" +
+	"\rStoredRaftLog\x12\x1b\n" +
+	"\tlog_index\x18\x01 \x01(\x03R\blogIndex\x12\x12\n" +
+	"\x04term\x18\x02 \x01(\x03R\x04term\x12D\n" +
+	"\x0eoperation_type\x18\x03 \x01(\x0e2\x1d.distributed_log.v1.OperationR\roperationType\x12+\n" +
+	"\x11operation_payload\x18\x04 \x01(\fR\x10operationPayload\"T\n" +
+	"\x12StoredRaftMetadata\x12!\n" +
+	"\fcurrent_term\x18\x01 \x01(\x03R\vcurrentTerm\x12\x1b\n" +
+	"\tvoted_for\x18\x02 \x01(\tR\bvotedFor\"\xe0\x01\n" +
+	"\x12StoredRaftSnapshot\x12\x1f\n" +
+	"\vsnapshot_id\x18\x01 \x01(\tR\n" +
+	"snapshotId\x12.\n" +
+	"\x13last_included_index\x18\x02 \x01(\x03R\x11lastIncludedIndex\x12,\n" +
+	"\x12last_included_term\x18\x03 \x01(\x03R\x10lastIncludedTerm\x12\x1a\n" +
+	"\blocation\x18\x04 \x01(\tR\blocation\x12/\n" +
+	"\x14created_at_unix_nano\x18\x05 \x01(\x03R\x11createdAtUnixNano\"\xa5\x01\n" +
+	"\x11StoredCurrentLock\x12\x1f\n" +
+	"\vresource_id\x18\x01 \x01(\tR\n" +
+	"resourceId\x12\x19\n" +
+	"\bowner_id\x18\x02 \x01(\tR\aownerId\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x03 \x01(\tR\trequestId\x12\x1d\n" +
+	"\n" +
+	"lock_token\x18\x04 \x01(\tR\tlockToken\x12\x16\n" +
+	"\x06expiry\x18\x05 \x01(\x03R\x06expiry\"\xc2\x01\n" +
+	"\x16StoredProcessedRequest\x12\x1b\n" +
+	"\tclient_id\x18\x01 \x01(\tR\bclientId\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x02 \x01(\tR\trequestId\x12\x1f\n" +
+	"\vresource_id\x18\x03 \x01(\tR\n" +
+	"resourceId\x12\x1a\n" +
+	"\bresponse\x18\x04 \x01(\fR\bresponse\x12/\n" +
+	"\x14created_at_unix_nano\x18\x05 \x01(\x03R\x11createdAtUnixNano\"U\n" +
+	"\x16StoredResourceLocation\x12\x1f\n" +
+	"\vresource_id\x18\x01 \x01(\tR\n" +
+	"resourceId\x12\x1a\n" +
+	"\blocation\x18\x02 \x01(\tR\blocation\"S\n" +
+	"\x14StoredApplicationLog\x12\x1f\n" +
+	"\vresource_id\x18\x01 \x01(\tR\n" +
+	"resourceId\x12\x1a\n" +
+	"\bmessages\x18\x02 \x03(\tR\bmessages\"\xa8\x03\n" +
+	"\x1eMemoryApplicationStateSnapshot\x12\x18\n" +
+	"\aversion\x18\x01 \x01(\rR\aversion\x12J\n" +
+	"\rcurrent_locks\x18\x02 \x03(\v2%.distributed_log.v1.StoredCurrentLockR\fcurrentLocks\x12Y\n" +
+	"\x12processed_requests\x18\x03 \x03(\v2*.distributed_log.v1.StoredProcessedRequestR\x11processedRequests\x12Y\n" +
+	"\x12resource_locations\x18\x04 \x03(\v2*.distributed_log.v1.StoredResourceLocationR\x11resourceLocations\x12<\n" +
+	"\x04logs\x18\x05 \x03(\v2(.distributed_log.v1.StoredApplicationLogR\x04logs\x12,\n" +
+	"\x12last_applied_index\x18\x06 \x01(\x03R\x10lastAppliedIndex*A\n" +
 	"\x04Vote\x12\x14\n" +
 	"\x10VOTE_UNSPECIFIED\x10\x00\x12\x10\n" +
 	"\fVOTE_GRANTED\x10\x01\x12\x11\n" +
@@ -1156,27 +1739,35 @@ func file_distributed_log_v1_raft_proto_rawDescGZIP() []byte {
 }
 
 var file_distributed_log_v1_raft_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_distributed_log_v1_raft_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_distributed_log_v1_raft_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
 var file_distributed_log_v1_raft_proto_goTypes = []any{
-	(Vote)(0),                       // 0: distributed_log.v1.Vote
-	(Operation)(0),                  // 1: distributed_log.v1.Operation
-	(AppendResponse)(0),             // 2: distributed_log.v1.AppendResponse
-	(SnapshotStatus)(0),             // 3: distributed_log.v1.SnapshotStatus
-	(*RequestVoteRequest)(nil),      // 4: distributed_log.v1.RequestVoteRequest
-	(*RequestVoteResponse)(nil),     // 5: distributed_log.v1.RequestVoteResponse
-	(*PreVoteRequest)(nil),          // 6: distributed_log.v1.PreVoteRequest
-	(*PreVoteResponse)(nil),         // 7: distributed_log.v1.PreVoteResponse
-	(*LogEntry)(nil),                // 8: distributed_log.v1.LogEntry
-	(*AppendEntriesRequest)(nil),    // 9: distributed_log.v1.AppendEntriesRequest
-	(*AppendEntriesResponse)(nil),   // 10: distributed_log.v1.AppendEntriesResponse
-	(*InstallSnapshotRequest)(nil),  // 11: distributed_log.v1.InstallSnapshotRequest
-	(*InstallSnapshotResponse)(nil), // 12: distributed_log.v1.InstallSnapshotResponse
-	(*AcquireLockCommand)(nil),      // 13: distributed_log.v1.AcquireLockCommand
-	(*ReleaseLockCommand)(nil),      // 14: distributed_log.v1.ReleaseLockCommand
-	(*AppendLogCommand)(nil),        // 15: distributed_log.v1.AppendLogCommand
-	(*AcquireLockRequest)(nil),      // 16: distributed_log.v1.AcquireLockRequest
-	(*ReleaseLockRequest)(nil),      // 17: distributed_log.v1.ReleaseLockRequest
-	(*AppendLogRequest)(nil),        // 18: distributed_log.v1.AppendLogRequest
+	(Vote)(0),                              // 0: distributed_log.v1.Vote
+	(Operation)(0),                         // 1: distributed_log.v1.Operation
+	(AppendResponse)(0),                    // 2: distributed_log.v1.AppendResponse
+	(SnapshotStatus)(0),                    // 3: distributed_log.v1.SnapshotStatus
+	(*RequestVoteRequest)(nil),             // 4: distributed_log.v1.RequestVoteRequest
+	(*RequestVoteResponse)(nil),            // 5: distributed_log.v1.RequestVoteResponse
+	(*PreVoteRequest)(nil),                 // 6: distributed_log.v1.PreVoteRequest
+	(*PreVoteResponse)(nil),                // 7: distributed_log.v1.PreVoteResponse
+	(*LogEntry)(nil),                       // 8: distributed_log.v1.LogEntry
+	(*AppendEntriesRequest)(nil),           // 9: distributed_log.v1.AppendEntriesRequest
+	(*AppendEntriesResponse)(nil),          // 10: distributed_log.v1.AppendEntriesResponse
+	(*InstallSnapshotRequest)(nil),         // 11: distributed_log.v1.InstallSnapshotRequest
+	(*InstallSnapshotResponse)(nil),        // 12: distributed_log.v1.InstallSnapshotResponse
+	(*AcquireLockCommand)(nil),             // 13: distributed_log.v1.AcquireLockCommand
+	(*ReleaseLockCommand)(nil),             // 14: distributed_log.v1.ReleaseLockCommand
+	(*AppendLogCommand)(nil),               // 15: distributed_log.v1.AppendLogCommand
+	(*StoredRaftLog)(nil),                  // 16: distributed_log.v1.StoredRaftLog
+	(*StoredRaftMetadata)(nil),             // 17: distributed_log.v1.StoredRaftMetadata
+	(*StoredRaftSnapshot)(nil),             // 18: distributed_log.v1.StoredRaftSnapshot
+	(*StoredCurrentLock)(nil),              // 19: distributed_log.v1.StoredCurrentLock
+	(*StoredProcessedRequest)(nil),         // 20: distributed_log.v1.StoredProcessedRequest
+	(*StoredResourceLocation)(nil),         // 21: distributed_log.v1.StoredResourceLocation
+	(*StoredApplicationLog)(nil),           // 22: distributed_log.v1.StoredApplicationLog
+	(*MemoryApplicationStateSnapshot)(nil), // 23: distributed_log.v1.MemoryApplicationStateSnapshot
+	(*AcquireLockRequest)(nil),             // 24: distributed_log.v1.AcquireLockRequest
+	(*ReleaseLockRequest)(nil),             // 25: distributed_log.v1.ReleaseLockRequest
+	(*AppendLogRequest)(nil),               // 26: distributed_log.v1.AppendLogRequest
 }
 var file_distributed_log_v1_raft_proto_depIdxs = []int32{
 	0,  // 0: distributed_log.v1.RequestVoteResponse.vote_status:type_name -> distributed_log.v1.Vote
@@ -1185,22 +1776,27 @@ var file_distributed_log_v1_raft_proto_depIdxs = []int32{
 	8,  // 3: distributed_log.v1.AppendEntriesRequest.entries:type_name -> distributed_log.v1.LogEntry
 	2,  // 4: distributed_log.v1.AppendEntriesResponse.append_status:type_name -> distributed_log.v1.AppendResponse
 	3,  // 5: distributed_log.v1.InstallSnapshotResponse.status:type_name -> distributed_log.v1.SnapshotStatus
-	16, // 6: distributed_log.v1.AcquireLockCommand.request:type_name -> distributed_log.v1.AcquireLockRequest
-	17, // 7: distributed_log.v1.ReleaseLockCommand.request:type_name -> distributed_log.v1.ReleaseLockRequest
-	18, // 8: distributed_log.v1.AppendLogCommand.request:type_name -> distributed_log.v1.AppendLogRequest
-	4,  // 9: distributed_log.v1.RaftService.RequestVote:input_type -> distributed_log.v1.RequestVoteRequest
-	9,  // 10: distributed_log.v1.RaftService.AppendEntries:input_type -> distributed_log.v1.AppendEntriesRequest
-	11, // 11: distributed_log.v1.RaftService.InstallSnapshot:input_type -> distributed_log.v1.InstallSnapshotRequest
-	6,  // 12: distributed_log.v1.RaftService.PreVote:input_type -> distributed_log.v1.PreVoteRequest
-	5,  // 13: distributed_log.v1.RaftService.RequestVote:output_type -> distributed_log.v1.RequestVoteResponse
-	10, // 14: distributed_log.v1.RaftService.AppendEntries:output_type -> distributed_log.v1.AppendEntriesResponse
-	12, // 15: distributed_log.v1.RaftService.InstallSnapshot:output_type -> distributed_log.v1.InstallSnapshotResponse
-	7,  // 16: distributed_log.v1.RaftService.PreVote:output_type -> distributed_log.v1.PreVoteResponse
-	13, // [13:17] is the sub-list for method output_type
-	9,  // [9:13] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	24, // 6: distributed_log.v1.AcquireLockCommand.request:type_name -> distributed_log.v1.AcquireLockRequest
+	25, // 7: distributed_log.v1.ReleaseLockCommand.request:type_name -> distributed_log.v1.ReleaseLockRequest
+	26, // 8: distributed_log.v1.AppendLogCommand.request:type_name -> distributed_log.v1.AppendLogRequest
+	1,  // 9: distributed_log.v1.StoredRaftLog.operation_type:type_name -> distributed_log.v1.Operation
+	19, // 10: distributed_log.v1.MemoryApplicationStateSnapshot.current_locks:type_name -> distributed_log.v1.StoredCurrentLock
+	20, // 11: distributed_log.v1.MemoryApplicationStateSnapshot.processed_requests:type_name -> distributed_log.v1.StoredProcessedRequest
+	21, // 12: distributed_log.v1.MemoryApplicationStateSnapshot.resource_locations:type_name -> distributed_log.v1.StoredResourceLocation
+	22, // 13: distributed_log.v1.MemoryApplicationStateSnapshot.logs:type_name -> distributed_log.v1.StoredApplicationLog
+	4,  // 14: distributed_log.v1.RaftService.RequestVote:input_type -> distributed_log.v1.RequestVoteRequest
+	9,  // 15: distributed_log.v1.RaftService.AppendEntries:input_type -> distributed_log.v1.AppendEntriesRequest
+	11, // 16: distributed_log.v1.RaftService.InstallSnapshot:input_type -> distributed_log.v1.InstallSnapshotRequest
+	6,  // 17: distributed_log.v1.RaftService.PreVote:input_type -> distributed_log.v1.PreVoteRequest
+	5,  // 18: distributed_log.v1.RaftService.RequestVote:output_type -> distributed_log.v1.RequestVoteResponse
+	10, // 19: distributed_log.v1.RaftService.AppendEntries:output_type -> distributed_log.v1.AppendEntriesResponse
+	12, // 20: distributed_log.v1.RaftService.InstallSnapshot:output_type -> distributed_log.v1.InstallSnapshotResponse
+	7,  // 21: distributed_log.v1.RaftService.PreVote:output_type -> distributed_log.v1.PreVoteResponse
+	18, // [18:22] is the sub-list for method output_type
+	14, // [14:18] is the sub-list for method input_type
+	14, // [14:14] is the sub-list for extension type_name
+	14, // [14:14] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_distributed_log_v1_raft_proto_init() }
@@ -1215,7 +1811,7 @@ func file_distributed_log_v1_raft_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_distributed_log_v1_raft_proto_rawDesc), len(file_distributed_log_v1_raft_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   12,
+			NumMessages:   20,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

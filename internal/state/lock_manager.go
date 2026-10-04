@@ -12,10 +12,11 @@ import (
 
 type LockStore interface {
 	ApplyAcquireLock(ctx context.Context, req *pb.AcquireLockRequest, lockToken string, expiry int64, observedAt int64) error
-	SnapshotApplicationState(ctx context.Context) ([]byte, error)
-	RestoreApplicationState(ctx context.Context, data []byte) error
 	ApplyReleaseLock(ctx context.Context, req *pb.ReleaseLockRequest, observedAt int64) error
 	ApplyAppendLog(ctx context.Context, req *pb.AppendLogRequest, observedAt int64) error
+	SnapshotApplicationState(ctx context.Context) ([]byte, error)
+	RestoreApplicationState(ctx context.Context, data []byte) error
+	SyncApplicationState(context.Context) error
 }
 
 type LockManager struct {
@@ -32,6 +33,32 @@ func NewLockManager(store LockStore) (*LockManager, error) {
 }
 
 func (manager *LockManager) Apply(
+	ctx context.Context,
+	entry storage.RaftLog,
+) error {
+	if err := manager.applyEntry(ctx, entry); err != nil {
+		return err
+	}
+	return manager.store.SyncApplicationState(ctx)
+}
+
+func (manager *LockManager) ApplyBatch(
+	ctx context.Context,
+	entries []storage.RaftLog,
+) error {
+	if batchStore, ok := manager.store.(interface {
+		ApplyRaftBatch(context.Context, []storage.RaftLog) error
+	}); ok {
+		return batchStore.ApplyRaftBatch(ctx, entries)
+	}
+	for _, entry := range entries {
+		if err := manager.applyEntry(ctx, entry); err != nil {
+			return err
+		}
+	}
+	return manager.store.SyncApplicationState(ctx)
+}
+func (manager *LockManager) applyEntry(
 	ctx context.Context,
 	entry storage.RaftLog,
 ) error {
@@ -162,4 +189,15 @@ func (manager *LockManager) Restore(
 	data []byte,
 ) error {
 	return manager.store.RestoreApplicationState(ctx, data)
+}
+func (manager *LockManager) LastAppliedIndex(
+	ctx context.Context,
+) (int64, error) {
+	provider, ok := manager.store.(interface {
+		LastAppliedIndex(context.Context) (int64, error)
+	})
+	if !ok {
+		return 0, nil
+	}
+	return provider.LastAppliedIndex(ctx)
 }

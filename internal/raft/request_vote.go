@@ -7,12 +7,14 @@ import (
 
 	pb "github.com/Hardik-G1/distributed-log/gen/distributed_log/v1"
 	"github.com/Hardik-G1/distributed-log/internal/storage"
-	"github.com/jackc/pgx/v5"
 )
 
 func (node *Node) HandleRequestVote(
 	ctx context.Context, req *pb.RequestVoteRequest,
 ) (*pb.RequestVoteResponse, error) {
+	if ctx == nil {
+		return nil, errors.New("context is nil")
+	}
 	if req == nil {
 		return nil, errors.New("request vote is nil")
 	}
@@ -24,10 +26,8 @@ func (node *Node) HandleRequestVote(
 	}
 	node.logMu.Lock()
 	defer node.logMu.Unlock()
-	lastLogIndex, lastLogTerm, err := node.lastLogInfo(ctx)
-	if err != nil {
-		return nil, err
-	}
+	lastLogIndex := node.lastLogIndex
+	lastLogTerm := node.lastLogTerm
 
 	// a new term makes this node a follower
 	if err := node.stepDownForTerm(ctx, req.VoteTerm); err != nil {
@@ -59,17 +59,18 @@ func (node *Node) HandleRequestVote(
 		node.stateMu.Unlock()
 		return response, nil
 	}
-	node.state.VotedFor = req.CandidateId
 	metadata := storage.RaftMetadata{
 		CurrentTerm: node.state.CurrentTerm,
-		VotedFor:    node.state.VotedFor,
+		VotedFor:    req.CandidateId,
 	}
-	response.VoteStatus = pb.Vote_VOTE_GRANTED
 	node.stateMu.Unlock()
 	if err := node.store.SaveRaftMetadata(ctx, metadata); err != nil {
 		return nil, err
 	}
-
+	node.stateMu.Lock()
+	node.state.VotedFor = req.CandidateId
+	response.VoteStatus = pb.Vote_VOTE_GRANTED
+	node.stateMu.Unlock()
 	node.resetElectionTimer()
 	return response, nil
 }
@@ -126,36 +127,13 @@ func (node *Node) handleVoteResponse(
 	return nil
 }
 
-func (node *Node) lastLogInfo(ctx context.Context) (int64, int64, error) {
-	if ctx == nil {
-		return 0, 0, errors.New("context is nil")
-	}
-	if err := ctx.Err(); err != nil {
-		return 0, 0, err
-	}
-	node.stateMu.Lock()
-	lastIncludedIndex := node.state.LastIncludedIndex
-	lastIncludedTerm := node.state.LastIncludedTerm
-	node.stateMu.Unlock()
-
-	entry, err := node.store.GetLastRaftLog(ctx)
-
-	if errors.Is(err, pgx.ErrNoRows) {
-		return lastIncludedIndex, lastIncludedTerm, nil
-	}
-	if err != nil {
-		return 0, 0, err
-	}
-	if entry.LogIndex <= lastIncludedIndex {
-		return lastIncludedIndex, lastIncludedTerm, nil
-	}
-	return entry.LogIndex, entry.Term, nil
-}
-
 func (node *Node) HandlePreVote(
 	ctx context.Context,
 	req *pb.PreVoteRequest,
 ) (*pb.PreVoteResponse, error) {
+	if ctx == nil {
+		return nil, errors.New("context is nil")
+	}
 	if req == nil {
 		return nil, errors.New("pre-vote request is nil")
 	}
@@ -166,11 +144,10 @@ func (node *Node) HandlePreVote(
 		return nil, errors.New("pre-vote request contains negative values")
 	}
 	node.logMu.Lock()
-	lastLogIndex, lastLogTerm, err := node.lastLogInfo(ctx)
-	node.logMu.Unlock()
-	if err != nil {
-		return nil, err
-	}
+	defer node.logMu.Unlock()
+	lastLogIndex := node.lastLogIndex
+	lastLogTerm := node.lastLogTerm
+
 	node.stateMu.Lock()
 	defer node.stateMu.Unlock()
 	response := &pb.PreVoteResponse{
@@ -179,7 +156,7 @@ func (node *Node) HandlePreVote(
 		VoteStatus: pb.Vote_VOTE_REJECTED,
 	}
 	if req.VoteTerm < node.state.CurrentTerm+1 ||
-		node.state.Role == RoleLeader {
+		node.state.Role == RoleLeader || node.installingSnapshot.Load() {
 		return response, nil
 	}
 	if !node.lastLeaderContact.IsZero() &&

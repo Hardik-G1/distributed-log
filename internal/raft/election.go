@@ -47,12 +47,10 @@ func (node *Node) startElection(ctx context.Context) error {
 		return nil
 	}
 	node.logMu.Lock()
-	defer node.logMu.Unlock()
+	lastLogIndex := node.lastLogIndex
+	lastLogTerm := node.lastLogTerm
+	node.logMu.Unlock()
 
-	lastLogIndex, lastLogTerm, err := node.lastLogInfo(ctx)
-	if err != nil {
-		return err
-	}
 	node.termMu.Lock()
 	defer node.termMu.Unlock()
 	node.stateMu.Lock()
@@ -71,19 +69,13 @@ func (node *Node) startElection(ctx context.Context) error {
 		node.stateMu.Unlock()
 		return errors.New("peer transport is not configured")
 	}
-	node.state.Role = RoleCandidate
-	node.state.CurrentTerm++
-	node.state.VotedFor = node.state.NodeID
-	node.state.LeaderID = ""
-	node.votesReceived = 1
-	node.votesGranted = make(map[string]struct{})
-	node.votesGranted[node.state.NodeID] = struct{}{}
-	metadata := storage.RaftMetadata{
-		CurrentTerm: node.state.CurrentTerm,
-		VotedFor:    node.state.VotedFor,
-	}
-	electionTerm := node.state.CurrentTerm
+	electionTerm := node.state.CurrentTerm + 1
 	candidateID := node.state.NodeID
+
+	metadata := storage.RaftMetadata{
+		CurrentTerm: electionTerm,
+		VotedFor:    candidateID,
+	}
 
 	request := &pb.RequestVoteRequest{
 		VoteTerm:             electionTerm,
@@ -102,6 +94,12 @@ func (node *Node) startElection(ctx context.Context) error {
 		return err
 	}
 
+	node.state.Role = RoleCandidate
+	node.state.CurrentTerm = electionTerm
+	node.state.VotedFor = candidateID
+	node.state.LeaderID = ""
+	node.votesReceived = 1
+	node.votesGranted = map[string]struct{}{candidateID: {}}
 	if node.votesReceived >= majority(len(node.state.Peers)+1) {
 		node.becomeLeaderLocked(lastLogIndex)
 		node.stateMu.Unlock()
@@ -145,7 +143,6 @@ func (node *Node) sendVoteRequest(
 func (node *Node) becomeLeaderLocked(lastLogIndex int64) {
 	node.state.Role = RoleLeader
 	node.state.LeaderID = node.state.NodeID
-	leaderTerm := node.state.CurrentTerm
 
 	for peerID := range node.state.Peers {
 		node.state.Peers[peerID] = PeerProgress{
@@ -153,29 +150,23 @@ func (node *Node) becomeLeaderLocked(lastLogIndex int64) {
 			MatchIndex: 0,
 		}
 	}
-	go node.appendLeaderNoop(node.ctx, leaderTerm)
+	node.signalReplication()
+	node.signalLeaderNoop()
 }
-func (node *Node) appendLeaderNoop(
-	ctx context.Context,
-	leaderTerm int64,
-) {
-	if ctx == nil {
-		return
+func (node *Node) signalLeaderNoop() {
+	select {
+	case node.leaderNoopCh <- struct{}{}:
+	default:
 	}
-	node.stateMu.Lock()
-	stillLeader := node.state.Role == RoleLeader &&
-		node.state.CurrentTerm == leaderTerm
-	node.stateMu.Unlock()
-	if !stillLeader {
-		return
-	}
-	_, err := node.Propose(
-		ctx,
-		int32(pb.Operation_OPERATION_NOOP),
-		[]byte{0},
-	)
-	if err != nil && !errors.Is(err, ErrNotLeader) {
-		log.Printf("append leader no op %v", err)
+}
+func (node *Node) leaderNoopLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-node.leaderNoopCh:
+			_, _ = node.ProposeAndWait(ctx, int32(pb.Operation_OPERATION_NOOP), nil)
+		}
 	}
 }
 
@@ -215,11 +206,9 @@ func (node *Node) runPreVote(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	node.logMu.Lock()
-	lastLogIndex, lastLogTerm, err := node.lastLogInfo(ctx)
+	lastLogIndex := node.lastLogIndex
+	lastLogTerm := node.lastLogTerm
 	node.logMu.Unlock()
-	if err != nil {
-		return false, err
-	}
 	node.stateMu.Lock()
 	if node.state.Role == RoleLeader || (!node.lastLeaderContact.IsZero() && (time.Since(node.lastLeaderContact) < node.config.ElectionTimeout)) {
 		node.stateMu.Unlock()

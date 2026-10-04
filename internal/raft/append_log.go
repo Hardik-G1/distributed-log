@@ -8,7 +8,6 @@ import (
 
 	pb "github.com/Hardik-G1/distributed-log/gen/distributed_log/v1"
 	"github.com/Hardik-G1/distributed-log/internal/storage"
-	"github.com/jackc/pgx/v5"
 )
 
 // reject stale leaders
@@ -44,6 +43,9 @@ func (node *Node) HandleAppendEntries(
 	ctx context.Context,
 	req *pb.AppendEntriesRequest,
 ) (*pb.AppendEntriesResponse, error) {
+	if ctx == nil {
+		return nil, errors.New("context is nil")
+	}
 	if err := validateAppendEntriesRequest(req); err != nil {
 		return nil, err
 	}
@@ -104,12 +106,8 @@ func (node *Node) HandleAppendEntries(
 			case req.PrevLogIndex < lastIncludedIndex:
 				response.MatchIndex = lastIncludedIndex
 			default:
-				localLastIndex, _, lastErr := node.lastLogInfo(ctx)
-				if lastErr != nil {
-					return nil, lastErr
-				}
-				if req.PrevLogIndex > localLastIndex {
-					response.MatchIndex = localLastIndex
+				if req.PrevLogIndex > node.lastLogIndex {
+					response.MatchIndex = node.lastLogIndex
 				} else if req.PrevLogIndex > 0 {
 					response.MatchIndex = req.PrevLogIndex - 1
 				}
@@ -132,17 +130,17 @@ func (node *Node) HandleAppendEntries(
 		lastTerm = lastEntry.Term
 	}
 
-	localLastIndex, _, err := node.lastLogInfo(ctx)
-	if err != nil {
-		return nil, err
-	}
+	localLastIndex := node.lastLogIndex
 	node.stateMu.Lock()
 	if req.LeaderCommitIndex > node.state.CommitIndex {
-		node.state.CommitIndex = min(req.LeaderCommitIndex, localLastIndex)
+		newCommitIndex := min(req.LeaderCommitIndex, localLastIndex)
+		if newCommitIndex > node.state.CommitIndex {
+			node.state.CommitIndex = newCommitIndex
+			node.notifyCommitLocked()
+		}
 	}
 	node.lastLeaderContact = time.Now()
 	node.stateMu.Unlock()
-	node.resetElectionTimer()
 	response.MatchIndex = lastIndex
 	response.LatestAppendedTerm = lastTerm
 	response.AppendStatus = pb.AppendResponse_APPEND_RESPONSE_SUCCESS
@@ -170,12 +168,16 @@ func (node *Node) verifyPreviousEntry(
 		return nil
 	}
 
-	entry, err := node.store.GetRaftLog(ctx, index)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrLogMismatch
-	}
-	if err != nil {
-		return err
+	entry, cached := node.cachedRaftLogLocked(index)
+	if !cached {
+		var err error
+		entry, err = node.store.GetRaftLog(ctx, index)
+		if errors.Is(err, storage.ErrNotFound) {
+			return ErrLogMismatch
+		}
+		if err != nil {
+			return err
+		}
 	}
 	if entry.Term != term {
 		return ErrLogMismatch
@@ -187,29 +189,50 @@ func (node *Node) reconcileFollowerLog(
 	ctx context.Context,
 	req *pb.AppendEntriesRequest,
 ) error {
-	for i, incoming := range req.Entries {
-		index := req.PrevLogIndex + int64(i) + 1
-		existing, err := node.store.GetRaftLog(ctx, index)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return node.replaceFollowerSuffix(
-				ctx,
-				req,
-				i,
-				index,
-			)
+	for offset, incoming := range req.Entries {
+		index := req.PrevLogIndex + int64(offset) + 1
+		existing, cached := node.cachedRaftLogLocked(index)
+		if !cached {
+			var err error
+			existing, err = node.store.GetRaftLog(ctx, index)
+			if errors.Is(err, storage.ErrNotFound) {
+				return node.appendFollowerSuffix(
+					ctx,
+					req,
+					offset,
+					index,
+				)
+			}
+			if err != nil {
+				return err
+			}
 		}
-		if err != nil {
-			return err
-		}
+
 		if existing.Term != incoming.Term {
 			return node.replaceFollowerSuffix(
 				ctx,
 				req,
-				i,
+				offset,
 				index,
 			)
 		}
 	}
+	return nil
+}
+func (node *Node) appendFollowerSuffix(
+	ctx context.Context,
+	req *pb.AppendEntriesRequest,
+	start int,
+	startIndex int64,
+) error {
+	entries, err := followerEntries(req, start, startIndex)
+	if err != nil || len(entries) == 0 {
+		return err
+	}
+	if err := node.store.AppendRaftLogs(ctx, entries); err != nil {
+		return fmt.Errorf("append follower raft suffix %w", err)
+	}
+	node.cacheRaftLogsLocked(entries, 0)
 	return nil
 }
 
@@ -219,21 +242,9 @@ func (node *Node) replaceFollowerSuffix(
 	start int,
 	startIndex int64,
 ) error {
-	if start < 0 || start > len(req.Entries) {
-		return errors.New("invalid replacement start index")
-	}
-	entries := make([]storage.RaftLog, 0, len(req.Entries)-start)
-	for _, incoming := range req.Entries[start:] {
-		entries = append(entries, storage.RaftLog{
-			LogIndex:         startIndex,
-			Term:             incoming.Term,
-			OperationType:    int32(incoming.OperationType),
-			OperationPayload: incoming.OperationPayload,
-		})
-		startIndex++
-	}
-	if len(entries) == 0 {
-		return nil
+	entries, err := followerEntries(req, start, startIndex)
+	if err != nil || len(entries) == 0 {
+		return err
 	}
 	if err := node.store.ReplaceRaftSuffix(
 		ctx,
@@ -242,5 +253,29 @@ func (node *Node) replaceFollowerSuffix(
 	); err != nil {
 		return fmt.Errorf("replace follower raft suffix %w", err)
 	}
+	node.cacheRaftLogsLocked(entries, entries[0].LogIndex)
 	return nil
+
+}
+
+func followerEntries(req *pb.AppendEntriesRequest,
+	start int,
+	startIndex int64) ([]storage.RaftLog, error) {
+	if start < 0 || start > len(req.Entries) {
+		return nil, errors.New("invalid replacement start index")
+	}
+	entries := make([]storage.RaftLog, 0, len(req.Entries)-start)
+	for _, incoming := range req.Entries[start:] {
+		if incoming == nil {
+			return nil, errors.New("follower entry is nil")
+		}
+		entries = append(entries, storage.RaftLog{
+			LogIndex:         startIndex,
+			Term:             incoming.Term,
+			OperationType:    int32(incoming.OperationType),
+			OperationPayload: append([]byte(nil), incoming.OperationPayload...),
+		})
+		startIndex++
+	}
+	return entries, nil
 }

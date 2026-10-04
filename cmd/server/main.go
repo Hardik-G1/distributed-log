@@ -32,28 +32,37 @@ func main() {
 		syscall.SIGTERM,
 	)
 	defer cancel()
-	if cfg.PostgresDSN == "" {
-		log.Fatal("postgres DSN is required")
-	}
-	pool, err := storage.OpenPostgres(ctx, cfg.PostgresDSN)
+	raftStore, err := storage.OpenWALRaftStore(cfg.RaftDataDirectory)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer pool.Close()
-	store := storage.NewPostgresStore(pool)
+	defer func() {
+		if err := raftStore.Close(); err != nil {
+			log.Printf("close raft store %v", err)
+		}
+	}()
+	applicationStore, err := storage.OpenMemoryApplicationStore(cfg.AppDataDirectory)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() {
+		if err := applicationStore.Close(); err != nil {
+			log.Printf("close application store %v", err)
+		}
+	}()
 	transport, err := raft.NewGRPCTransport(cfg.PeerAddrs)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer transport.Close()
 
-	lockManager, err := state.NewLockManager(store)
+	lockManager, err := state.NewLockManager(applicationStore)
 	if err != nil {
 		log.Fatal(err)
 	}
 	node, err := raft.NewNode(
 		ctx,
-		cfg, store,
+		cfg, raftStore,
 		lockManager,
 		transport,
 	)
@@ -76,6 +85,11 @@ func main() {
 		log.Fatal(err)
 	}
 	pb.RegisterRaftServiceServer(grpcServer, raftServer)
+	lockServer, err := api.NewLockServer(node, applicationStore)
+	if err != nil {
+		log.Fatal(err)
+	}
+	pb.RegisterLockServiceServer(grpcServer, lockServer)
 	healthServer := health.NewServer()
 	healthpb.RegisterHealthServer(grpcServer, healthServer)
 	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
@@ -83,11 +97,7 @@ func main() {
 		<-ctx.Done()
 		grpcServer.GracefulStop()
 	}()
-	lockServer, err := api.NewLockServer(node, store)
-	if err != nil {
-		log.Fatal(err)
-	}
-	pb.RegisterLockServiceServer(grpcServer, lockServer)
+
 	if err := grpcServer.Serve(listener); err != nil &&
 		!errors.Is(err, grpc.ErrServerStopped) {
 		log.Fatal(err)

@@ -14,12 +14,25 @@ func (node *Node) stepDownForTerm(
 	if ctx == nil {
 		return errors.New("context is nil")
 	}
+	if term < 0 {
+		return errors.New("term cannot be negative")
+	}
 	node.termMu.Lock()
 	defer node.termMu.Unlock()
 	node.stateMu.Lock()
+	defer node.stateMu.Unlock()
 	if term <= node.state.CurrentTerm {
-		node.stateMu.Unlock()
 		return nil
+	}
+	metadata := storage.RaftMetadata{
+		CurrentTerm: term,
+		VotedFor:    "",
+	}
+	if err := node.store.SaveRaftMetadata(
+		ctx,
+		metadata,
+	); err != nil {
+		return err
 	}
 	node.state.CurrentTerm = term
 	node.state.Role = RoleFollower
@@ -27,13 +40,7 @@ func (node *Node) stepDownForTerm(
 	node.state.LeaderID = ""
 	node.votesReceived = 0
 	node.votesGranted = make(map[string]struct{})
-	metadata := storage.RaftMetadata{
-		CurrentTerm: node.state.CurrentTerm,
-		VotedFor:    node.state.VotedFor,
-	}
-	node.stateMu.Unlock()
-	return node.store.SaveRaftMetadata(
-		ctx,
-		metadata,
-	)
+
+	node.notifyCommitLocked()
+	return nil
 }

@@ -5,19 +5,20 @@ import (
 	"errors"
 
 	"github.com/Hardik-G1/distributed-log/internal/storage"
-	"github.com/jackc/pgx/v5"
 )
 
 type recoveredRaftState struct {
 	Metadata          storage.RaftMetadata
 	LastLogIndex      int64
+	LastLogTerm       int64
 	LastIncludedIndex int64
 	LastIncludedTerm  int64
+	LastAppliedIndex  int64
 }
 
 func recoveryRaftState(
 	ctx context.Context,
-	store *storage.PostgresStore,
+	store storage.RaftLogStore,
 	stateMachine StateMachine,
 ) (recoveredRaftState, error) {
 	if ctx == nil {
@@ -51,8 +52,9 @@ func recoveryRaftState(
 		}
 		recovered.LastIncludedIndex = snapshot.LastIncludedIndex
 		recovered.LastIncludedTerm = snapshot.LastIncludedTerm
+		recovered.LastAppliedIndex = snapshot.LastIncludedIndex
 
-	case errors.Is(err, pgx.ErrNoRows):
+	case errors.Is(err, storage.ErrNotFound):
 
 	default:
 		return recoveredRaftState{}, err
@@ -61,13 +63,28 @@ func recoveryRaftState(
 	switch {
 	case err == nil:
 		recovered.LastLogIndex = lastLog.LogIndex
-	case errors.Is(err, pgx.ErrNoRows):
+		recovered.LastLogTerm = lastLog.Term
+	case errors.Is(err, storage.ErrNotFound):
 		recovered.LastLogIndex = recovered.LastIncludedIndex
+		recovered.LastLogTerm = recovered.LastIncludedTerm
 	default:
 		return recoveredRaftState{}, err
 	}
 	if recovered.LastLogIndex < recovered.LastIncludedIndex {
 		recovered.LastLogIndex = recovered.LastIncludedIndex
+		recovered.LastLogTerm = recovered.LastIncludedTerm
+	}
+	if provider, ok := stateMachine.(AppliedIndexProvider); ok {
+		appliedIndex, err := provider.LastAppliedIndex(ctx)
+		if err != nil {
+			return recoveredRaftState{}, err
+		}
+		if appliedIndex > recovered.LastAppliedIndex {
+			recovered.LastAppliedIndex = appliedIndex
+		}
+	}
+	if recovered.LastAppliedIndex > recovered.LastLogIndex {
+		return recoveredRaftState{}, errors.New("application state is ahead of the raft log")
 	}
 	return recovered, nil
 }

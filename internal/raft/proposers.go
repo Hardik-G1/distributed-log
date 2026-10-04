@@ -38,53 +38,165 @@ func (node *Node) Propose(
 	if operationType <= 0 {
 		return storage.RaftLog{}, errors.New("operation type is invalid")
 	}
-	node.proposalMu.Lock()
-	defer node.proposalMu.Unlock()
+	node.lifecycleMu.Lock()
+	runCtx := node.ctx
+	running := node.started && !node.stopped
+	node.lifecycleMu.Unlock()
+
+	if !running || runCtx == nil {
+		return storage.RaftLog{}, errors.New("node is not running")
+	}
+	request := &proposalRequest{
+		operationType: operationType,
+		payload:       append([]byte(nil), payload...),
+		result:        make(chan proposalResult, 1),
+	}
+	select {
+	case node.proposalCh <- request:
+	case <-ctx.Done():
+		return storage.RaftLog{}, ctx.Err()
+	case <-runCtx.Done():
+		return storage.RaftLog{}, errors.New("node is stopping")
+	}
+	select {
+	case result := <-request.result:
+		return result.entry, result.err
+	case <-ctx.Done():
+		return storage.RaftLog{}, ctx.Err()
+	case <-runCtx.Done():
+		return storage.RaftLog{}, errors.New("node is stopping")
+	}
+}
+
+func (node *Node) proposalLoop(
+	ctx context.Context,
+) {
+	maxBatch := node.config.ProposalBatchMax
+	if maxBatch <= 0 {
+		maxBatch = 1024
+	}
+	readyBatch := node.config.ProposalBatchSize
+	if readyBatch <= 0 || readyBatch > maxBatch {
+		readyBatch = min(256, maxBatch)
+	}
+	maxWait := node.config.ProposalBatchWait
+	if maxWait < 0 {
+		maxWait = 0
+	}
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case first := <-node.proposalCh:
+			batch := make([]*proposalRequest, 0, maxBatch)
+			batch = append(batch, first)
+		drain:
+			for len(batch) < maxBatch {
+				select {
+				case request := <-node.proposalCh:
+					batch = append(batch, request)
+				default:
+					break drain
+				}
+			}
+			if len(batch) < readyBatch && len(batch) < maxBatch && maxWait > 0 {
+				timer.Reset(maxWait)
+			collect:
+				for len(batch) < readyBatch && len(batch) < maxBatch {
+					select {
+					case request := <-node.proposalCh:
+						batch = append(batch, request)
+					case <-timer.C:
+						break collect
+					case <-ctx.Done():
+						stopProposalTimer(timer)
+						node.finishProposalBatch(batch, nil, ctx.Err())
+						return
+
+					}
+				}
+				stopProposalTimer(timer)
+			}
+			node.processProposalBatch(ctx, batch)
+		}
+	}
+}
+
+func stopProposalTimer(timer *time.Timer) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+}
+func (node *Node) processProposalBatch(
+	ctx context.Context,
+	requests []*proposalRequest,
+) {
 	node.stateMu.Lock()
 	if node.state.Role != RoleLeader {
 		leaderID := node.state.LeaderID
 		node.stateMu.Unlock()
-		return storage.RaftLog{}, &NotLeaderError{
-			LeaderID: leaderID,
-		}
+		node.finishProposalBatch(requests, nil, &NotLeaderError{LeaderID: leaderID})
+		return
 	}
 	term := node.state.CurrentTerm
 	node.stateMu.Unlock()
 	node.logMu.Lock()
-	lastIndex, _, err := node.lastLogInfo(ctx)
-	if err != nil {
-		node.logMu.Unlock()
-		return storage.RaftLog{}, err
-	}
+	lastIndex := node.lastLogIndex
 	node.stateMu.Lock()
+
 	if node.state.Role != RoleLeader || node.state.CurrentTerm != term {
 		leaderID := node.state.LeaderID
 		node.stateMu.Unlock()
 		node.logMu.Unlock()
-		return storage.RaftLog{}, &NotLeaderError{LeaderID: leaderID}
+		node.finishProposalBatch(requests, nil, &NotLeaderError{LeaderID: leaderID})
+		return
 	}
 	node.stateMu.Unlock()
-	entry := storage.RaftLog{
-		LogIndex:         lastIndex + 1,
-		Term:             term,
-		OperationType:    operationType,
-		OperationPayload: payload,
+	entries := make([]storage.RaftLog, len(requests))
+	for index, request := range requests {
+		entries[index] = storage.RaftLog{
+			LogIndex:         lastIndex + int64(index) + 1,
+			Term:             term,
+			OperationType:    request.operationType,
+			OperationPayload: request.payload,
+		}
 	}
-
-	if err := node.store.AppendRaftLogs(
-		ctx,
-		[]storage.RaftLog{entry},
-	); err != nil {
-		node.logMu.Unlock()
-		return storage.RaftLog{}, err
+	err := node.store.AppendRaftLogs(ctx, entries)
+	if err == nil {
+		node.cacheRaftLogsLocked(entries, 0)
 	}
 	node.logMu.Unlock()
-	//commit single node proposals
-	if err := node.advanceCommitIndex(ctx); err != nil {
-		return storage.RaftLog{}, err
+	if err != nil {
+		node.finishProposalBatch(requests, nil, err)
+		return
 	}
+	node.finishProposalBatch(requests, entries, nil)
+	node.signalReplication()
+	_ = node.advanceCommitIndex(ctx)
+}
 
-	return entry, nil
+func (node *Node) finishProposalBatch(
+	requests []*proposalRequest,
+	entries []storage.RaftLog,
+	err error,
+) {
+	for index, request := range requests {
+		result := proposalResult{
+			err: err,
+		}
+		if err == nil {
+			result.entry = entries[index]
+		}
+		request.result <- result
+	}
 }
 
 // wait until the entry is committed
@@ -92,14 +204,12 @@ func (node *Node) WaitForCommit(
 	ctx context.Context,
 	index int64,
 ) error {
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-
 	for {
 		node.stateMu.Lock()
 		commitIndex := node.state.CommitIndex
 		role := node.state.Role
 		leaderID := node.state.LeaderID
+		waitCh := node.commitWaitCh
 		node.stateMu.Unlock()
 
 		if commitIndex >= index {
@@ -115,7 +225,7 @@ func (node *Node) WaitForCommit(
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ticker.C:
+		case <-waitCh:
 
 		}
 
@@ -127,12 +237,11 @@ func (node *Node) WaitForApplied(
 	ctx context.Context,
 	index int64,
 ) error {
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
 
 	for {
 		node.stateMu.Lock()
 		lastApplied := node.state.LastAppliedIndex
+		waitCh := node.applyWaitCh
 		node.stateMu.Unlock()
 
 		if lastApplied >= index {
@@ -141,7 +250,7 @@ func (node *Node) WaitForApplied(
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ticker.C:
+		case <-waitCh:
 
 		}
 	}
@@ -199,12 +308,13 @@ func (node *Node) ProposeAndWaitWithKey(
 				errors.New("node is not running"),
 			)
 		} else {
+			payloadCopy := append([]byte(nil), payload...)
 			go node.startPendingProposal(
 				key,
 				pending,
 				runCtx,
 				operationType,
-				append([]byte(nil), payload...),
+				payloadCopy,
 			)
 		}
 	}

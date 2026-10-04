@@ -11,47 +11,68 @@ import (
 	"github.com/Hardik-G1/distributed-log/internal/storage"
 )
 
-type pendingProposal struct {
-	done  chan struct{}
-	entry storage.RaftLog
-	err   error
-}
 type Node struct {
 	stateMu            sync.Mutex
-	proposalMu         sync.Mutex
+	pendingMu          sync.Mutex
 	termMu             sync.Mutex
 	logMu              sync.Mutex
-	pendingMu          sync.Mutex
 	lifecycleMu        sync.Mutex
 	snapshotMu         sync.Mutex
 	stateMachineMu     sync.Mutex
-	replicationMu      sync.Mutex
-	replicatingPeers   map[string]bool
-	replicationWg      sync.WaitGroup
 	installingSnapshot atomic.Bool
 	lastLeaderContact  time.Time
 	config             *config.ServerConfig
-	store              *storage.PostgresStore
+	store              storage.RaftLogStore
 	state              NodeState
-	ctx                context.Context
-	cancel             context.CancelFunc
-	doneCh             chan struct{}
+
+	lastLogIndex int64
+	lastLogTerm  int64
+	logCacheBase int64
+	logCache     []storage.RaftLog
+
+	ctx    context.Context
+	cancel context.CancelFunc
+	doneCh chan struct{}
 
 	started          bool
 	stopped          bool
 	votesReceived    int
 	votesGranted     map[string]struct{}
-	electionResetCh  chan struct{}
-	stateMachine     StateMachine
-	transport        PeerTransport
-	incomingSnapshot *incomingSnapshot
 	pendingProposals map[string]*pendingProposal
+
+	electionResetCh   chan struct{}
+	proposalCh        chan *proposalRequest
+	replicationCh     chan struct{}
+	leaderNoopCh      chan struct{}
+	applyCh           chan struct{}
+	peerReplicationCh map[string]chan struct{}
+	commitWaitCh      chan struct{}
+	applyWaitCh       chan struct{}
+	stateMachine      StateMachine
+	transport         PeerTransport
+	incomingSnapshot  *incomingSnapshot
+}
+
+type pendingProposal struct {
+	done  chan struct{}
+	entry storage.RaftLog
+	err   error
+}
+type proposalRequest struct {
+	operationType int32
+	payload       []byte
+	result        chan proposalResult
+}
+
+type proposalResult struct {
+	entry storage.RaftLog
+	err   error
 }
 
 func NewNode(
 	ctx context.Context,
 	cfg *config.ServerConfig,
-	store *storage.PostgresStore,
+	store storage.RaftLogStore,
 	stateMachine StateMachine,
 	transport PeerTransport,
 ) (*Node, error) {
@@ -71,39 +92,49 @@ func NewNode(
 	if err != nil {
 		return nil, err
 	}
-	metadata := recovered.Metadata
-	lastLogIndex := recovered.LastLogIndex
-	peers := make(map[string]PeerProgress)
 
+	peers := make(map[string]PeerProgress)
+	peerReplicationCh := make(map[string]chan struct{})
 	for peerID := range cfg.PeerAddrs {
 		if peerID == cfg.NodeID {
 			continue
 		}
 		peers[peerID] = PeerProgress{
-			NextIndex:  lastLogIndex + 1,
+			NextIndex:  recovered.LastLogIndex + 1,
 			MatchIndex: 0,
 		}
+		peerReplicationCh[peerID] = make(chan struct{}, 1)
 	}
 	if len(peers) > 0 && transport == nil {
 		return nil, errors.New("peer transport is required")
 	}
 	node := &Node{
-		config:           cfg,
-		store:            store,
-		doneCh:           make(chan struct{}),
-		electionResetCh:  make(chan struct{}, 1),
+		config:            cfg,
+		store:             store,
+		doneCh:            make(chan struct{}),
+		electionResetCh:   make(chan struct{}, 1),
+		proposalCh:        make(chan *proposalRequest, 4096),
+		replicationCh:     make(chan struct{}, 1),
+		leaderNoopCh:      make(chan struct{}, 1),
+		applyCh:           make(chan struct{}, 1),
+		peerReplicationCh: peerReplicationCh,
+		commitWaitCh:      make(chan struct{}),
+		applyWaitCh:       make(chan struct{}),
+
 		stateMachine:     stateMachine,
 		transport:        transport,
 		votesGranted:     make(map[string]struct{}),
 		pendingProposals: make(map[string]*pendingProposal),
-		replicatingPeers: make(map[string]bool),
+		lastLogIndex:     recovered.LastLogIndex,
+		lastLogTerm:      recovered.LastLogTerm,
+
 		state: NodeState{
 			NodeID:            cfg.NodeID,
 			Role:              RoleFollower,
-			CurrentTerm:       metadata.CurrentTerm,
-			VotedFor:          metadata.VotedFor,
-			CommitIndex:       recovered.LastIncludedIndex,
-			LastAppliedIndex:  recovered.LastIncludedIndex,
+			CurrentTerm:       recovered.Metadata.CurrentTerm,
+			VotedFor:          recovered.Metadata.VotedFor,
+			CommitIndex:       recovered.LastAppliedIndex,
+			LastAppliedIndex:  recovered.LastAppliedIndex,
 			LastIncludedIndex: recovered.LastIncludedIndex,
 			LastIncludedTerm:  recovered.LastIncludedTerm,
 			LeaderID:          "",
@@ -131,9 +162,13 @@ func (node *Node) Start(parent context.Context) error {
 }
 
 func (node *Node) run() {
-	defer close(node.doneCh) // 3 now it closes the doneChannel
+	defer close(node.doneCh)
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(5 + len(node.peerReplicationCh))
+	go func() {
+		defer wg.Done()
+		node.proposalLoop(node.ctx)
+	}()
 	go func() {
 		defer wg.Done()
 		node.electionLoop(node.ctx)
@@ -144,11 +179,27 @@ func (node *Node) run() {
 	}()
 	go func() {
 		defer wg.Done()
+		node.leaderNoopLoop(node.ctx)
+	}()
+	go func() {
+		defer wg.Done()
 		node.applyLoop(node.ctx)
 	}()
+	for peerID, wakeCh := range node.peerReplicationCh {
+		peerID := peerID
+		wakeCh := wakeCh
+		go func() {
+			defer wg.Done()
+			node.replicationPeerLoop(
+				node.ctx,
+				peerID,
+				wakeCh,
+			)
+		}()
+	}
+	node.signalApply()
 	<-node.ctx.Done() // 1 waits for the context to be done
 	wg.Wait()
-	node.replicationWg.Wait()
 }
 
 func (node *Node) Stop() {

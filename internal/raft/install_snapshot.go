@@ -181,6 +181,23 @@ func (node *Node) HandleInstallSnapshot(
 	defer node.stateMachineMu.Unlock()
 	node.logMu.Lock()
 	defer node.logMu.Unlock()
+
+	retainSuffix := false
+
+	switch {
+	case incoming.LastIncludedIndex == lastIncludedIndex && incoming.LastIncludedTerm == lastIncludedTerm:
+		retainSuffix = true
+	case incoming.LastIncludedIndex > lastIncludedIndex && incoming.LastIncludedIndex <= node.lastLogIndex:
+		boundaryEntry, cached := node.cachedRaftLogLocked(incoming.LastIncludedIndex)
+		if !cached {
+			boundaryEntry, err = node.store.GetRaftLog(ctx, incoming.LastIncludedIndex)
+		}
+		if err == nil && boundaryEntry.Term == incoming.LastIncludedTerm {
+			retainSuffix = true
+		} else if err != nil && !errors.Is(err, storage.ErrNotFound) {
+			return nil, err
+		}
+	}
 	data, err := os.ReadFile(incoming.TempPath)
 	if err != nil {
 		return nil, fmt.Errorf("read incoming snapshot %w", err)
@@ -207,25 +224,50 @@ func (node *Node) HandleInstallSnapshot(
 	if err := restorer.Restore(ctx, data); err != nil {
 		return nil, err
 	}
-
+	truncateThrough := incoming.LastIncludedIndex
+	if !retainSuffix && node.lastLogIndex > truncateThrough {
+		truncateThrough = node.lastLogIndex
+	}
 	if err := node.store.DeleteRaftEntriesThrough(
 		ctx,
-		incoming.LastIncludedIndex,
+		truncateThrough,
 	); err != nil {
 		return nil, err
 	}
+	if retainSuffix {
+		node.discardCachedRaftLogsThroughLocked(incoming.LastIncludedIndex)
+
+	} else {
+		node.logCache = node.logCache[:0]
+		node.logCacheBase = 0
+	}
+	if !retainSuffix ||
+		node.lastLogIndex <= incoming.LastIncludedIndex {
+		node.lastLogIndex = incoming.LastIncludedIndex
+		node.lastLogTerm = incoming.LastIncludedTerm
+	}
 	node.stateMu.Lock()
+	commitAdvanced := false
+	appliedAdvanced := false
 	if node.state.LastIncludedIndex < incoming.LastIncludedIndex {
 		node.state.LastIncludedIndex = incoming.LastIncludedIndex
 		node.state.LastIncludedTerm = incoming.LastIncludedTerm
 	}
 	if node.state.CommitIndex < incoming.LastIncludedIndex {
 		node.state.CommitIndex = incoming.LastIncludedIndex
+		commitAdvanced = true
 	}
 	if node.state.LastAppliedIndex < incoming.LastIncludedIndex {
 		node.state.LastAppliedIndex = incoming.LastIncludedIndex
+		appliedAdvanced = true
 	}
 	node.lastLeaderContact = time.Now()
+	if commitAdvanced {
+		node.notifyCommitLocked()
+	}
+	if appliedAdvanced {
+		node.notifyAppliedLocked()
+	}
 	node.stateMu.Unlock()
 	node.resetElectionTimer()
 	_ = os.Remove(incoming.TempPath)
