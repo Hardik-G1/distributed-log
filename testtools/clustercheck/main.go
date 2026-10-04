@@ -385,17 +385,210 @@ func runFailover(c *cluster, servers *managedServers, resource string) error {
 	return nil
 }
 
+func appendAndRelease(
+	c *cluster,
+	clientID string,
+	resource string,
+	message string,
+) error {
+	lock, _, err := c.acquire(&pb.AcquireLockRequest{
+		ClientId:          clientID,
+		RequestId:         requestID(clientID+"-acquire", 1),
+		ResourceId:        resource,
+		ClientRequestedAt: time.Now().Unix(),
+	})
+	if err != nil {
+		return fmt.Errorf("acquire for %s: %w", clientID, err)
+	}
+	if lock.LockStatus != pb.LockStatus_LOCK_STATUS_APPROVED {
+		return fmt.Errorf("acquire for %s returned %s", clientID, lock.LockStatus.String())
+	}
+	appended, _, err := c.append(&pb.AppendLogRequest{
+		ClientId:     clientID,
+		RequestId:    requestID(clientID+"-append", 1),
+		ResourceId:   resource,
+		Message:      message,
+		LockToken:    lock.LockToken,
+		ClientSentAt: time.Now().Unix(),
+	})
+	if err != nil {
+		return fmt.Errorf("append for %s: %w", clientID, err)
+	}
+	if appended.AppendStatus != pb.AppendStatus_APPEND_STATUS_COMMITTED {
+		return fmt.Errorf("append for %s returned %s", clientID, appended.AppendStatus.String())
+	}
+	released, _, err := c.release(&pb.ReleaseLockRequest{
+		ClientId:          clientID,
+		RequestId:         requestID(clientID+"-release", 1),
+		ResourceId:        resource,
+		LockToken:         lock.LockToken,
+		ClientRequestedAt: time.Now().Unix(),
+	})
+	if err != nil {
+		return fmt.Errorf("release for %s: %w", clientID, err)
+	}
+	if released.ReleaseStatus != pb.ReleaseStatus_RELEASE_STATUS_RELEASED {
+		return fmt.Errorf("release for %s returned %s", clientID, released.ReleaseStatus.String())
+	}
+	return nil
+}
+
+func runFollowerRecovery(c *cluster, servers *managedServers, resource string) error {
+	if servers == nil || len(servers.servers) != 3 {
+		return errors.New("follower-recovery mode requires a managed three-node cluster")
+	}
+	discoveryClient := "follower-recovery-discovery"
+	discoveryLock, leader, err := c.acquire(&pb.AcquireLockRequest{
+		ClientId:          discoveryClient,
+		RequestId:         requestID("follower-recovery-discovery", 1),
+		ResourceId:        resource,
+		ClientRequestedAt: time.Now().Unix(),
+	})
+	if err != nil {
+		return fmt.Errorf("discover leader: %w", err)
+	}
+	if discoveryLock.LockStatus != pb.LockStatus_LOCK_STATUS_APPROVED {
+		return fmt.Errorf("leader discovery returned %s", discoveryLock.LockStatus.String())
+	}
+	if _, _, err := c.release(&pb.ReleaseLockRequest{
+		ClientId:          discoveryClient,
+		RequestId:         requestID("follower-recovery-discovery-release", 1),
+		ResourceId:        resource,
+		LockToken:         discoveryLock.LockToken,
+		ClientRequestedAt: time.Now().Unix(),
+	}); err != nil {
+		return fmt.Errorf("release discovery lock: %w", err)
+	}
+
+	followers := make([]string, 0, 2)
+	for _, server := range servers.servers {
+		if server.address != leader {
+			followers = append(followers, server.address)
+		}
+	}
+	if len(followers) != 2 {
+		return fmt.Errorf("expected two followers for leader %s, got %v", leader, followers)
+	}
+
+	if err := servers.KillAddress(followers[0]); err != nil {
+		return fmt.Errorf("stop first follower: %w", err)
+	}
+	messageBeforeRestart := fmt.Sprintf("follower-down-%d", time.Now().UnixNano())
+	if err := appendAndRelease(c, "follower-down-client", resource, messageBeforeRestart); err != nil {
+		return err
+	}
+
+	if err := servers.RestartAddress(followers[0]); err != nil {
+		return fmt.Errorf("restart first follower: %w", err)
+	}
+	// Give replication time to transfer the suffix written while this follower
+	// was unavailable before making it the leader's only quorum partner.
+	time.Sleep(2 * time.Second)
+	if err := servers.KillAddress(followers[1]); err != nil {
+		return fmt.Errorf("stop second follower: %w", err)
+	}
+
+	messageAfterRestart := fmt.Sprintf("follower-rejoined-%d", time.Now().UnixNano())
+	if err := appendAndRelease(c, "follower-rejoined-client", resource, messageAfterRestart); err != nil {
+		return fmt.Errorf("restarted follower did not participate in quorum: %w", err)
+	}
+	readResponse, _, err := c.get(&pb.GetLogDataRequest{
+		ClientId:     "follower-recovery-reader",
+		RequestId:    requestID("follower-recovery-read", 1),
+		ResourceId:   resource,
+		LogPosition:  0,
+		Length:       -1,
+		ClientSentAt: time.Now().Unix(),
+	})
+	if err != nil {
+		return fmt.Errorf("read after follower recovery: %w", err)
+	}
+	if readResponse.Status != pb.GetStatus_GET_STATUS_FETCHED ||
+		!strings.Contains(readResponse.Content, messageBeforeRestart) ||
+		!strings.Contains(readResponse.Content, messageAfterRestart) {
+		return fmt.Errorf("follower recovery content mismatch status=%s content=%q", readResponse.Status.String(), readResponse.Content)
+	}
+	log.Printf(
+		"follower-recovery correctness=PASS leader=%s restarted=%s removed=%s",
+		leader, followers[0], followers[1],
+	)
+	return nil
+}
+
+func runRestartRecovery(
+	c *cluster,
+	servers *managedServers,
+	prefix string,
+	clients int,
+	messages int,
+	resources int,
+	concurrency int,
+	lockBatch int,
+	timeout time.Duration,
+) error {
+	if servers == nil {
+		return errors.New("restart-recovery mode requires --manage-servers")
+	}
+	if err := runMulti(c, prefix, clients, messages, resources, concurrency, lockBatch, timeout); err != nil {
+		return err
+	}
+	// Snapshot creation is periodic. Wait for the next check and require a real
+	// snapshot so this test exercises snapshot plus WAL-tail recovery.
+	time.Sleep(2 * time.Second)
+	if !servers.AllHaveSnapshots() {
+		return errors.New("restart-recovery did not create a snapshot; lower --snapshot-threshold or increase the workload")
+	}
+	if err := servers.RestartAll(); err != nil {
+		return fmt.Errorf("restart cluster: %w", err)
+	}
+	correctness, err := validateWorkload(
+		c,
+		prefix,
+		expectedWorkload(prefix, clients, messages, resources, lockBatch),
+		timeout,
+	)
+	if err != nil {
+		return fmt.Errorf("validate after full restart: %w", err)
+	}
+	log.Printf("restart-recovery correctness=%s", correctness)
+	return nil
+}
+
 func runNoQuorum(c *cluster, servers *managedServers, resource string) error {
 	if servers == nil || len(servers.servers) != 3 {
 		return errors.New("no-quorum mode requires a managed three-node cluster")
 	}
-	if err := servers.KillAddress(servers.servers[0].address); err != nil {
-		return err
+	discoveryClient := "no-quorum-discovery"
+	discoveryLock, leader, err := c.acquire(&pb.AcquireLockRequest{
+		ClientId:          discoveryClient,
+		RequestId:         requestID("no-quorum-discovery", 1),
+		ResourceId:        resource,
+		ClientRequestedAt: time.Now().Unix(),
+	})
+	if err != nil {
+		return fmt.Errorf("discover leader: %w", err)
 	}
-	if err := servers.KillAddress(servers.servers[1].address); err != nil {
-		return err
+	if discoveryLock.LockStatus != pb.LockStatus_LOCK_STATUS_APPROVED {
+		return fmt.Errorf("leader discovery returned %s", discoveryLock.LockStatus.String())
 	}
-	time.Sleep(2 * time.Second)
+	if _, _, err := c.release(&pb.ReleaseLockRequest{
+		ClientId:          discoveryClient,
+		RequestId:         requestID("no-quorum-discovery-release", 1),
+		ResourceId:        resource,
+		LockToken:         discoveryLock.LockToken,
+		ClientRequestedAt: time.Now().Unix(),
+	}); err != nil {
+		return fmt.Errorf("release discovery lock: %w", err)
+	}
+	for _, server := range servers.servers {
+		if server.address == leader {
+			continue
+		}
+		if err := servers.KillAddress(server.address); err != nil {
+			return err
+		}
+	}
+	time.Sleep(500 * time.Millisecond)
 	response, endpoint, err := c.acquire(&pb.AcquireLockRequest{
 		ClientId: "no-quorum-client", RequestId: requestID("no-quorum", 1),
 		ResourceId: resource, ClientRequestedAt: time.Now().Unix(),
@@ -403,7 +596,7 @@ func runNoQuorum(c *cluster, servers *managedServers, resource string) error {
 	if err == nil {
 		return fmt.Errorf("write unexpectedly succeeded without quorum through %s: %v", endpoint, response)
 	}
-	log.Printf("no-quorum correctness=PASS write rejected: %v", err)
+	log.Printf("no-quorum correctness=PASS isolated_leader=%s write rejected: %v", leader, err)
 	return nil
 }
 
@@ -832,10 +1025,61 @@ func percentile(samples []time.Duration, fraction float64) time.Duration {
 }
 
 type managedServer struct {
-	address string
-	cmd     *exec.Cmd
-	stdout  *os.File
-	stderr  *os.File
+	address       string
+	executable    string
+	workDirectory string
+	args          []string
+	stdoutPath    string
+	stderrPath    string
+	cmd           *exec.Cmd
+	stdout        *os.File
+	stderr        *os.File
+}
+
+func (server *managedServer) start() error {
+	if server.cmd != nil {
+		return fmt.Errorf("server %s is already running", server.address)
+	}
+	stdout, err := os.OpenFile(server.stdoutPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return fmt.Errorf("open stdout log for %s: %w", server.address, err)
+	}
+	stderr, err := os.OpenFile(server.stderrPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		_ = stdout.Close()
+		return fmt.Errorf("open stderr log for %s: %w", server.address, err)
+	}
+	cmd := exec.Command(server.executable, server.args...)
+	cmd.Dir = server.workDirectory
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		_ = stdout.Close()
+		_ = stderr.Close()
+		return fmt.Errorf("start %s: %w", server.address, err)
+	}
+	server.cmd = cmd
+	server.stdout = stdout
+	server.stderr = stderr
+	return nil
+}
+
+func (server *managedServer) stop() {
+	if server.cmd != nil {
+		if server.cmd.Process != nil {
+			_ = server.cmd.Process.Kill()
+		}
+		_ = server.cmd.Wait()
+		server.cmd = nil
+	}
+	if server.stdout != nil {
+		_ = server.stdout.Close()
+		server.stdout = nil
+	}
+	if server.stderr != nil {
+		_ = server.stderr.Close()
+		server.stderr = nil
+	}
 }
 
 func (servers *managedServers) KillAddress(address string) error {
@@ -843,10 +1087,25 @@ func (servers *managedServers) KillAddress(address string) error {
 		if server.address != address {
 			continue
 		}
-		if server.cmd.Process == nil {
+		if server.cmd == nil || server.cmd.Process == nil {
 			return fmt.Errorf("server %s has no process", address)
 		}
-		return server.cmd.Process.Kill()
+		server.stop()
+		return nil
+	}
+	return fmt.Errorf("managed server %s was not found", address)
+}
+
+func (servers *managedServers) RestartAddress(address string) error {
+	for _, server := range servers.servers {
+		if server.address != address {
+			continue
+		}
+		server.stop()
+		if err := server.start(); err != nil {
+			return err
+		}
+		return waitForPort(address, 30*time.Second)
 	}
 	return fmt.Errorf("managed server %s was not found", address)
 }
@@ -860,15 +1119,36 @@ func (servers *managedServers) Stop() {
 		return
 	}
 	for _, server := range servers.servers {
-		if server.cmd.Process != nil {
-			_ = server.cmd.Process.Kill()
+		server.stop()
+	}
+}
+
+func (servers *managedServers) RestartAll() error {
+	servers.Stop()
+	for _, server := range servers.servers {
+		if err := server.start(); err != nil {
+			servers.Stop()
+			return err
 		}
 	}
 	for _, server := range servers.servers {
-		_ = server.cmd.Wait()
-		_ = server.stdout.Close()
-		_ = server.stderr.Close()
+		if err := waitForPort(server.address, 30*time.Second); err != nil {
+			servers.Stop()
+			return err
+		}
 	}
+	time.Sleep(2 * time.Second)
+	return nil
+}
+
+func (servers *managedServers) AllHaveSnapshots() bool {
+	for _, server := range servers.servers {
+		matches, err := filepath.Glob(filepath.Join(server.workDirectory, "data", "snapshot", "*.bin"))
+		if err != nil || len(matches) == 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func waitForPort(address string, timeout time.Duration) error {
@@ -934,15 +1214,6 @@ func startManagedServers(
 		if err := os.MkdirAll(workDirectory, 0o700); err != nil {
 			return nil, fmt.Errorf("create work directory: %w", err)
 		}
-		stdout, err := os.Create(filepath.Join(workRoot, fmt.Sprintf("node%d.stdout.log", index+1)))
-		if err != nil {
-			return nil, fmt.Errorf("create stdout log: %w", err)
-		}
-		stderr, err := os.Create(filepath.Join(workRoot, fmt.Sprintf("node%d.stderr.log", index+1)))
-		if err != nil {
-			_ = stdout.Close()
-			return nil, fmt.Errorf("create stderr log: %w", err)
-		}
 		args := []string{
 			"--node-id=" + spec.id,
 			"--listen-addr=" + spec.address,
@@ -957,18 +1228,18 @@ func startManagedServers(
 			fmt.Sprintf("--proposal-batch-size=%d", proposalBatchSize),
 			fmt.Sprintf("--proposal-batch-max=%d", proposalBatchMax),
 		}
-		cmd := exec.Command(serverExecutable, args...)
-		cmd.Dir = workDirectory
-		cmd.Stdout = stdout
-		cmd.Stderr = stderr
-		if err := cmd.Start(); err != nil {
-			_ = stdout.Close()
-			_ = stderr.Close()
+		server := &managedServer{
+			address:       spec.address,
+			executable:    serverExecutable,
+			workDirectory: workDirectory,
+			args:          args,
+			stdoutPath:    filepath.Join(workRoot, fmt.Sprintf("node%d.stdout.log", index+1)),
+			stderrPath:    filepath.Join(workRoot, fmt.Sprintf("node%d.stderr.log", index+1)),
+		}
+		if err := server.start(); err != nil {
 			return nil, fmt.Errorf("start %s: %w", spec.id, err)
 		}
-		managed.servers = append(managed.servers, &managedServer{
-			address: spec.address, cmd: cmd, stdout: stdout, stderr: stderr,
-		})
+		managed.servers = append(managed.servers, server)
 	}
 	for _, spec := range specs {
 		if err := waitForPort(spec.address, 30*time.Second); err != nil {
@@ -996,7 +1267,7 @@ func seedManagedResources(
 	for index := 0; index < 3; index++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		seededResources := make([]storage.ResourceLocation, 0, resourceCount)
-		if mode == "multi" || mode == "verify-multi" {
+		if mode == "multi" || mode == "verify-multi" || mode == "restart-recovery" {
 			for resourceIndex := 0; resourceIndex < resourceCount; resourceIndex++ {
 				resourceID := fmt.Sprintf("%s-%04d", resourcePrefix, resourceIndex)
 				location := filepath.Join(absoluteWorkRoot, fmt.Sprintf("node%d", index+1), "data", resourceID+".log")
@@ -1028,7 +1299,7 @@ func seedManagedResources(
 
 func main() {
 	addresses := flag.String("addresses", "localhost:5001,localhost:5002,localhost:5003", "comma-separated server addresses")
-	mode := flag.String("mode", "sanity", "sanity, stress, multi, verify, verify-multi, failover, or no-quorum")
+	mode := flag.String("mode", "sanity", "sanity, stress, multi, verify, verify-multi, failover, follower-recovery, restart-recovery, or no-quorum")
 	resource := flag.String("resource", "test-resource-20261002", "resource id")
 	requests := flag.Int("requests", 1000, "stress request count")
 	expectedCount := flag.Int("expected-count", 0, "expected application-log message count in verify mode")
@@ -1057,7 +1328,7 @@ func main() {
 		}
 		if !*reuseData {
 			runID := time.Now().UnixNano()
-			if *mode == "multi" {
+			if *mode == "multi" || *mode == "restart-recovery" {
 				*resourcePrefix = fmt.Sprintf("%s-%d", *resourcePrefix, runID)
 			} else {
 				*resource = fmt.Sprintf("%s-%d", *resource, runID)
@@ -1066,7 +1337,7 @@ func main() {
 				*serverWorkRoot = filepath.Join(".test-artifacts", fmt.Sprintf("managed-cluster-%d", runID))
 			}
 			resourceCount := 1
-			if *mode == "multi" {
+			if *mode == "multi" || *mode == "restart-recovery" {
 				resourceCount = *resources
 			}
 			if err := seedManagedResources(
@@ -1122,6 +1393,17 @@ func main() {
 		}
 	case "failover":
 		err = runFailover(c, managed, *resource)
+	case "follower-recovery":
+		err = runFollowerRecovery(c, managed, *resource)
+	case "restart-recovery":
+		if *clients <= 0 || *messages <= 0 || *resources <= 0 || *concurrency <= 0 || *lockBatch <= 0 {
+			err = errors.New("clients, messages, resources, concurrency, and lock-batch must be positive")
+			break
+		}
+		err = runRestartRecovery(
+			c, managed, *resourcePrefix, *clients, *messages, *resources,
+			*concurrency, *lockBatch, *timeout,
+		)
 	case "no-quorum":
 		err = runNoQuorum(c, managed, *resource)
 	default:
